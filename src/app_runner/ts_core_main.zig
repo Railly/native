@@ -117,10 +117,24 @@ pub fn main(init: std.process.Init) !void {
                 const pack = native_sdk.canvas.ThemePack.fromName(spec.pack) orelse .house;
                 const scheme: native_sdk.canvas.ColorScheme =
                     if (std.mem.eql(u8, spec.scheme, "dark")) .dark else .light;
+                // `density` is optional on the spec (an extra text field:
+                // "compact" / "spacious", anything else — including a spec
+                // that omits it — reads regular), so density-aware apps
+                // resize the whole control register live.
+                const density: native_sdk.canvas.Density = if (comptime @hasField(@TypeOf(spec), "density"))
+                    (if (std.mem.eql(u8, spec.density, "compact"))
+                        .compact
+                    else if (std.mem.eql(u8, spec.density, "spacious"))
+                        .spacious
+                    else
+                        .regular)
+                else
+                    .regular;
                 const theme_options: native_sdk.canvas.ThemeOptions = .{
                     .color_scheme = scheme,
                     .contrast = if (spec.highContrast) .high else .standard,
                     .reduce_motion = spec.reduceMotion,
+                    .density = density,
                     .pack = pack,
                 };
                 // Token overrides ride an optional second export: a core
