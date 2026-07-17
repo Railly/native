@@ -105,17 +105,53 @@ pub fn main(init: std.process.Init) !void {
         // manifest theme pack composes with the live system appearance,
         // unchanged.
         options.tokens_fn = struct {
+            fn tokenPx(value: anytype) f32 {
+                return switch (@typeInfo(@TypeOf(value))) {
+                    .float => @floatCast(value),
+                    .int => @floatFromInt(value),
+                    else => @compileError("themeOverrides number fields must be numbers"),
+                };
+            }
             fn derive(model: *const core.Model) native_sdk.canvas.DesignTokens {
                 const spec = core.themeSpec(model);
                 const pack = native_sdk.canvas.ThemePack.fromName(spec.pack) orelse .house;
                 const scheme: native_sdk.canvas.ColorScheme =
                     if (std.mem.eql(u8, spec.scheme, "dark")) .dark else .light;
-                return native_sdk.canvas.DesignTokens.theme(.{
+                const theme_options: native_sdk.canvas.ThemeOptions = .{
                     .color_scheme = scheme,
                     .contrast = if (spec.highContrast) .high else .standard,
                     .reduce_motion = spec.reduceMotion,
                     .pack = pack,
-                });
+                };
+                // Token overrides ride an optional second export: a core
+                // exporting `themeOverrides(model)` owns individual token
+                // values on top of the pack. Negative values keep the
+                // pack's own token (the sentinel — records in the subset
+                // carry no optionals); `accent` is 0xRRGGBB and applies
+                // through the accent identity bundle (knockout ink,
+                // focus ring, slider range), skipped under high contrast
+                // exactly like the manifest accent — accessibility beats
+                // brand.
+                if (comptime @hasDecl(core, "themeOverrides")) {
+                    const o = core.themeOverrides(model);
+                    var overrides: native_sdk.canvas.DesignTokenOverrides = .{};
+                    if (!spec.highContrast) {
+                        const accent_value = o.accent;
+                        if (accent_value >= 0) {
+                            const rgb: u32 = @intFromFloat(tokenPx(accent_value));
+                            overrides = native_sdk.canvas.accentOverrides(native_sdk.canvas.Color.rgb8(
+                                @intCast((rgb >> 16) & 0xff),
+                                @intCast((rgb >> 8) & 0xff),
+                                @intCast(rgb & 0xff),
+                            ), scheme);
+                        }
+                    }
+                    if (o.radiusSm >= 0) overrides.radius.sm = tokenPx(o.radiusSm);
+                    if (o.radiusMd >= 0) overrides.radius.md = tokenPx(o.radiusMd);
+                    if (o.radiusLg >= 0) overrides.radius.lg = tokenPx(o.radiusLg);
+                    return native_sdk.canvas.DesignTokens.themeWithOverrides(theme_options, overrides);
+                }
+                return native_sdk.canvas.DesignTokens.theme(theme_options);
             }
         }.derive;
     }
