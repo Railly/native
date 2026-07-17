@@ -90,6 +90,35 @@ pub fn main(init: std.process.Init) !void {
         // exported command mapper.
         options.on_command = core.commandMsg;
     }
+    if (comptime @hasDecl(core, "themeSpec")) {
+        // Model-owned theming: a core exporting `themeSpec(model)` owns
+        // pack, scheme, contrast, and motion — the wiring derives the
+        // stock tokens from the spec on every install and rebuild
+        // (`tokens_fn`), so theme commands retheme the running app
+        // without a restart. The spec is structural, like the host-event
+        // records: `pack` and `scheme` are text (`"house"`/`"geist"`,
+        // `"light"`/`"dark"` — an unknown pack keeps house, an unknown
+        // scheme reads light), `highContrast` and `reduceMotion` are
+        // booleans. Cores that follow the OS wire `appearanceMsg` and
+        // mirror its fields into the model, exactly like a Zig core's
+        // `on_appearance` + `tokens_fn` pair. Without the export the
+        // manifest theme pack composes with the live system appearance,
+        // unchanged.
+        options.tokens_fn = struct {
+            fn derive(model: *const core.Model) native_sdk.canvas.DesignTokens {
+                const spec = core.themeSpec(model);
+                const pack = native_sdk.canvas.ThemePack.fromName(spec.pack) orelse .house;
+                const scheme: native_sdk.canvas.ColorScheme =
+                    if (std.mem.eql(u8, spec.scheme, "dark")) .dark else .light;
+                return native_sdk.canvas.DesignTokens.theme(.{
+                    .color_scheme = scheme,
+                    .contrast = if (spec.highContrast) .high else .standard,
+                    .reduce_motion = spec.reduceMotion,
+                    .pack = pack,
+                });
+            }
+        }.derive;
+    }
     // The platform caches directory for this app: when the core's
     // `Cmd.audioPlay` names a URL with no cachePath, the bridge derives
     // the conventional content-addressed path under this directory —
