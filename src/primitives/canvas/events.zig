@@ -464,10 +464,39 @@ pub fn isWidgetActivationKey(key: []const u8) bool {
 /// typing. One definition serves the typed-dispatch path (`Ui.Tree`)
 /// and the ui-app fallback gate.
 pub fn isWidgetTextEntry(widget: Widget) bool {
-    return switch (widget.kind) {
+    return isTextEntryKind(widget.kind);
+}
+
+/// The kind-level twin of `isWidgetTextEntry`, for callers that hold a
+/// focus target instead of a widget (the runtime's focus pass).
+pub fn isTextEntryKind(kind: WidgetKind) bool {
+    return switch (kind) {
         .input, .text_field, .search_field, .combobox, .textarea => true,
         else => false,
     };
+}
+
+/// The single-line text-entry kinds that forward unmodified vertical
+/// arrows to the app-level key fallback instead of jumping the caret:
+/// a one-line field has no vertical caret use beyond start/end (still
+/// reachable via primary+arrows and Home/End), and the Spotlight/
+/// palette convention drives a results list from the query field.
+/// Comboboxes stay out — their vertical arrows open the anchored
+/// picker — and textareas keep real vertical caret movement.
+pub fn textEntryKindForwardsVerticalArrows(kind: WidgetKind) bool {
+    return switch (kind) {
+        .input, .text_field, .search_field => true,
+        else => false,
+    };
+}
+
+/// True when a focused text entry should hand this key to the app-level
+/// fallback: an unmodified vertical arrow on a forwarding kind.
+pub fn widgetTextEntryForwardsKey(widget: Widget, keyboard: WidgetKeyboardEvent) bool {
+    if (!textEntryKindForwardsVerticalArrows(widget.kind)) return false;
+    if (keyboard.modifiers.hasNavigationModifier() or keyboard.modifiers.shift) return false;
+    return std.ascii.eqlIgnoreCase(keyboard.key, "arrowup") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown");
 }
 
 /// The arrow keys that open a closed select/combobox trigger's picker
