@@ -79,8 +79,15 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             // focusable menu entry mounted) keeps the caret jump — the
             // control resolver ignores it there, so both sides hear
             // the same move.
+            // Forwarding kinds (input/text-field/search-field) hand
+            // unmodified vertical arrows to the app-level key fallback
+            // instead of jumping the caret (the Spotlight/palette
+            // pattern) — see `canvas.textEntryKindForwardsVerticalArrows`.
             const arrow_opens_combobox = widget.kind == .combobox and !(widget.state.expanded orelse false);
-            if (!arrow_opens_combobox and canvasWidgetSingleLineTextKind(widget.kind) and keyboard.phase == .key_down and keyboard.text.len == 0 and !keyboard.modifiers.hasNavigationModifier()) {
+            if (!arrow_opens_combobox and canvasWidgetSingleLineTextKind(widget.kind) and
+                !canvas.textEntryKindForwardsVerticalArrows(widget.kind) and
+                keyboard.phase == .key_down and keyboard.text.len == 0 and !keyboard.modifiers.hasNavigationModifier())
+            {
                 if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return .{ .move_caret = .{ .direction = .start, .extend = keyboard.modifiers.shift } };
                 if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return .{ .move_caret = .{ .direction = .end, .extend = keyboard.modifiers.shift } };
             }

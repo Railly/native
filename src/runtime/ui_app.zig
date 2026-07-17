@@ -3331,7 +3331,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
                 if (tree.findWidget(target.id)) |widget| {
                     if (!widget.state.disabled) {
-                        if (canvas.isWidgetTextEntry(widget)) return;
+                        // Single-line text entries forward unmodified
+                        // vertical arrows to the fallback (the palette/
+                        // Spotlight pattern); everything else they eat.
+                        if (canvas.isWidgetTextEntry(widget) and
+                            !canvas.widgetTextEntryForwardsKey(widget, keyboard_event.keyboard)) return;
                         if (canvas.widgetKeyboardControlIntent(widget, keyboard_event.keyboard) != null) return;
                     }
                 }

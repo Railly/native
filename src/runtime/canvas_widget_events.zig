@@ -2164,6 +2164,18 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const focused_id = current_id orelse return false;
             const layout = self.views[index].widgetLayoutTree();
             const focused = layout.focusTargetById(focused_id) orelse return false;
+            // A focused forwarding text entry (input/text-field/
+            // search-field) keeps unmodified vertical arrows out of
+            // focus travel: the routing gate forwards them to the
+            // app-level key fallback (the Spotlight/palette pattern —
+            // the query field drives the results list), so the focus
+            // system must not spatial-move off the field first.
+            // Comboboxes (arrows walk into the mounted picker below),
+            // textareas, and modified arrows keep today's behavior.
+            if (canvas.textEntryKindForwardsVerticalArrows(focused.kind) and
+                !input_event.modifiers.hasAny() and
+                (std.ascii.eqlIgnoreCase(input_event.key, "arrowup") or
+                    std.ascii.eqlIgnoreCase(input_event.key, "arrowdown"))) return false;
             // FRAMEWORK BEHAVIOR CHANGE (deliberate, scoped — the same
             // seam as the keyboard-routing gate below): arrows and
             // Home/End never escalate QUIET focus on a plain list row
