@@ -3091,16 +3091,6 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     return self;
 }
 
-/// The layer's opacity follows the window's: a transparent window
-/// composites the surface's alpha over the desktop, and an opaque
-/// layer would fill the clear pixels with black.
-- (void)viewDidMoveToWindow {
-    [super viewDidMoveToWindow];
-    if (self.window && !self.window.isOpaque) {
-        self.metalLayer.opaque = NO;
-    }
-}
-
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label {
     self.host = host;
     self.windowId = windowId;
@@ -3138,6 +3128,12 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
+    // The layer's opacity follows the window's: a transparent window
+    // composites the surface's alpha over the desktop, and an opaque
+    // layer would fill the clear pixels with black.
+    if (self.window && !self.window.isOpaque) {
+        self.metalLayer.opaque = NO;
+    }
     self.window.acceptsMouseMovedEvents = YES;
     [self updateDrawableSize];
     [self updateSurfaceTrackingArea];
