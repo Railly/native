@@ -861,11 +861,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
-                // Same rule as the CEF block below: the SDK's usr/include
-                // must be a SYSTEM include dir or it shadows zig's bundled
-                // libc headers and surfaces SDK nullability gaps as a
-                // diagnostic flood.
-                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-isystem{s}/usr/include", .{sysroot}) else "";
+                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
