@@ -442,6 +442,17 @@ pub const WindowTitlebarStyle = enum {
 /// through the same chrome channel apps already map into a Msg, the
 /// value lives in the model and replays deterministically with the rest
 /// of the journal.
+/// What `moveWindow` reports back: the applied origin (top-left,
+/// screen points, y down), whether the clamp stopped each axis, and the
+/// live primary-button state.
+pub const MoveWindowResult = struct {
+    x: f64 = 0,
+    y: f64 = 0,
+    hit_x: bool = false,
+    hit_y: bool = false,
+    primary_down: bool = false,
+};
+
 pub const FormFactor = enum(u8) {
     unknown,
     compact,
@@ -2064,6 +2075,7 @@ pub const PlatformServices = struct {
     create_window_fn: ?*const fn (context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo = null,
     focus_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    move_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, dx: f64, dy: f64, clamp: bool) anyerror!MoveWindowResult = null,
     /// The real OS minimize verb (macOS miniaturize-to-Dock, Windows
     /// `SW_MINIMIZE`, GTK `gtk_window_minimize`), for app-drawn window
     /// controls — chromeless windows have no system button to click.
@@ -2341,6 +2353,17 @@ pub const PlatformServices = struct {
     pub fn closeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const close_fn = self.close_window_fn orelse return error.UnsupportedService;
         return close_fn(self.context, window_id);
+    }
+
+    /// Move a window by a screen-space delta (dx right, dy DOWN, the
+    /// pointer convention), optionally clamped to the screen's visible
+    /// frame. Returns the applied origin, which axes the clamp stopped,
+    /// and whether the primary mouse button is currently held: the
+    /// physics seam for companion windows (drag-release detection and
+    /// momentum both ride it).
+    pub fn moveWindow(self: PlatformServices, window_id: WindowId, dx: f64, dy: f64, clamp: bool) anyerror!MoveWindowResult {
+        const move_fn = self.move_window_fn orelse return error.UnsupportedService;
+        return move_fn(self.context, window_id, dx, dy, clamp);
     }
 
     pub fn minimizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {

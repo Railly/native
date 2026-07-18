@@ -216,7 +216,10 @@ pub const WindowActionBinding = struct {
     context: *anyopaque,
     close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    move_fn: *const fn (context: *anyopaque, window_label: []const u8, dx: f64, dy: f64, clamp: bool) ?MoveWindowResult,
 };
+
+pub const MoveWindowResult = platform.MoveWindowResult;
 
 /// Type-erased handle to the embedding host's named-command services,
 /// bound onto the effects channel (`bindHostCalls`). This is the seam
@@ -3317,6 +3320,18 @@ pub fn Effects(comptime Msg: type) type {
             if (self.executor == .fake) return;
             const binding = self.window_actions orelse return;
             _ = binding.close_fn(binding.context, window_label);
+        }
+
+        /// Move a window by a screen-space delta (dx right, dy down),
+        /// optionally clamped to the visible frame. Synchronous: the
+        /// result carries the applied origin, which axes the clamp
+        /// stopped, and the live primary-button state (dx=dy=0 reads
+        /// without moving). Null under the fake executor or when no
+        /// window actions are bound.
+        pub fn moveWindow(self: *Self, window_label: []const u8, dx: f64, dy: f64, clamp: bool) ?MoveWindowResult {
+            if (self.executor == .fake) return null;
+            const binding = self.window_actions orelse return null;
+            return binding.move_fn(binding.context, window_label, dx, dy, clamp);
         }
 
         /// Minimize a window by its declared label — the REAL OS verb

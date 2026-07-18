@@ -1052,6 +1052,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.effects.bindWindowActions(.{
                 .context = runtime,
                 .close_fn = effectsCloseWindowByLabel,
+                .move_fn = effectsMoveWindowByLabel,
                 .minimize_fn = effectsMinimizeWindowByLabel,
             });
             if (runtime.options.session_recorder) |recorder| {
@@ -3562,6 +3563,12 @@ fn effectsCloseWindowByLabel(context: *anyopaque, window_label: []const u8) bool
     // call, exactly like a reconcile close — see `Runtime.closeWindow`.
     runtime.closeWindow(window_id) catch return false;
     return true;
+}
+
+fn effectsMoveWindowByLabel(context: *anyopaque, window_label: []const u8, dx: f64, dy: f64, clamp: bool) ?platform.MoveWindowResult {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return null;
+    return runtime.options.platform.services.moveWindow(window_id, dx, dy, clamp) catch null;
 }
 
 fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) bool {

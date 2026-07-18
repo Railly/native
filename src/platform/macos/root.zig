@@ -145,6 +145,7 @@ extern fn native_sdk_appkit_request_frame(host: *AppKitHost) void;
 extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, window_flags: c_int, show_policy: c_int) c_int;
 extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_move_window(host: *AppKitHost, window_id: u64, dx: f64, dy: f64, clamp: c_int, out_x: *f64, out_y: *f64, out_hit_x: *c_int, out_hit_y: *c_int, out_primary_down: *c_int) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
@@ -582,6 +583,7 @@ pub const MacPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .move_window_fn = moveWindow,
                 .minimize_window_fn = minimizeWindow,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
@@ -1090,6 +1092,17 @@ fn focusWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_close_window(self.host, window_id) == 0) return error.CloseFailed;
+}
+
+fn moveWindow(context: ?*anyopaque, window_id: platform_mod.WindowId, dx: f64, dy: f64, clamp: bool) anyerror!platform_mod.MoveWindowResult {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var out_x: f64 = 0;
+    var out_y: f64 = 0;
+    var out_hit_x: c_int = 0;
+    var out_hit_y: c_int = 0;
+    var out_primary: c_int = 0;
+    if (native_sdk_appkit_move_window(self.host, window_id, dx, dy, if (clamp) 1 else 0, &out_x, &out_y, &out_hit_x, &out_hit_y, &out_primary) == 0) return error.WindowNotFound;
+    return .{ .x = out_x, .y = out_y, .hit_x = out_hit_x != 0, .hit_y = out_hit_y != 0, .primary_down = out_primary != 0 };
 }
 
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {

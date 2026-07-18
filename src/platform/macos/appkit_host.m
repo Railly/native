@@ -10018,6 +10018,37 @@ int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t wind
     return 1;
 }
 
+int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp, double *out_x, double *out_y, int *out_hit_x, int *out_hit_y, int *out_primary_down) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window) return 0;
+    NSRect frame = window.frame;
+    // dx/dy arrive in the pointer convention (y down); AppKit's origin
+    // is bottom-left, so dy subtracts.
+    double newX = frame.origin.x + dx;
+    double newY = frame.origin.y - dy;
+    BOOL hitX = NO, hitY = NO;
+    if (clamp) {
+        NSScreen *screen = window.screen ?: NSScreen.mainScreen;
+        NSRect visible = screen.visibleFrame;
+        double minX = visible.origin.x;
+        double maxX = NSMaxX(visible) - frame.size.width;
+        double minY = visible.origin.y;
+        double maxY = NSMaxY(visible) - frame.size.height;
+        if (newX < minX) { newX = minX; hitX = YES; }
+        if (newX > maxX) { newX = maxX; hitX = YES; }
+        if (newY < minY) { newY = minY; hitY = YES; }
+        if (newY > maxY) { newY = maxY; hitY = YES; }
+    }
+    if (dx != 0 || dy != 0) [window setFrameOrigin:NSMakePoint(newX, newY)];
+    if (out_x) *out_x = newX;
+    if (out_y) *out_y = newY;
+    if (out_hit_x) *out_hit_x = hitX ? 1 : 0;
+    if (out_hit_y) *out_hit_y = hitY ? 1 : 0;
+    if (out_primary_down) *out_primary_down = ([NSEvent pressedMouseButtons] & 1) ? 1 : 0;
+    return 1;
+}
+
 int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
