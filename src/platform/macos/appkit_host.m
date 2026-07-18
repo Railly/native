@@ -662,6 +662,17 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 /// color, packed RGBA8 per window — so residual gaps (resize slack,
 /// titlebar bands) show the app's background, never a blank default.
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *windowClearColors;
+/// Per-window origin samples appended on every windowDidMove (the
+/// notification fires reliably inside native window drags, where app
+/// event pumping can stall): {x, y (top-left convention), t seconds}.
+/// The moveWindow verb computes release velocity from this ring.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableArray<NSValue *> *> *windowMoveSamples;
+/// Windows currently in a primary-button drag (origin moved while the
+/// button was down). The moveWindow verb consumes the release edge:
+/// the first call after the button lifts reports released=1 with the
+/// ring's velocity, so the app never has to observe the drag itself
+/// (its event pump can stall inside the AppKit tracking loop).
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *windowDragActive;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *childWebViews;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSView *> *nativeViews;
 /// App-owned NSViews adopted into native view containers (native-surface
@@ -783,6 +794,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
+- (void)recordMoveSampleForWindowId:(uint64_t)windowId;
+- (NSPoint)moveVelocityForWindowId:(uint64_t)windowId;
 - (BOOL)startWindowDragWithId:(uint64_t)windowId;
 - (BOOL)chromeInsetsForWindowId:(uint64_t)windowId top:(double *)top left:(double *)left bottom:(double *)bottom right:(double *)right buttonsX:(double *)buttonsX buttonsY:(double *)buttonsY buttonsWidth:(double *)buttonsWidth buttonsHeight:(double *)buttonsHeight;
 - (WKWebView *)ensureMainWebViewForWindowId:(uint64_t)windowId;
@@ -927,6 +940,7 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 
 - (void)windowDidMove:(NSNotification *)notification {
     (void)notification;
+    [self.host recordMoveSampleForWindowId:self.windowId];
     [self.host emitWindowFrameForWindowId:self.windowId open:YES];
     [self.host scheduleFrame];
 }
@@ -6605,6 +6619,51 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     [self scheduleFrame];
 }
 
+/// Append a move sample for the window (top-left convention) and prune
+/// the ring past 150ms / 32 entries. Called from windowDidMove on the
+/// main thread.
+- (void)recordMoveSampleForWindowId:(uint64_t)windowId {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    NSMutableArray<NSValue *> *ring = self.windowMoveSamples[@(windowId)];
+    if (!ring) {
+        ring = [NSMutableArray array];
+        self.windowMoveSamples[@(windowId)] = ring;
+    }
+    NSRect frame = window.frame;
+    double screenTop = NSMaxY(NSScreen.screens.firstObject.frame);
+    double t = [NSDate timeIntervalSinceReferenceDate];
+    NSPoint p = NSMakePoint(frame.origin.x, screenTop - (frame.origin.y + frame.size.height));
+    [ring addObject:[NSValue valueWithRect:NSMakeRect(p.x, p.y, t, 0)]];
+    NSLog(@"petdex-host: didMove sample win=%llu ring=%lu down=%d", windowId, (unsigned long)ring.count, ([NSEvent pressedMouseButtons] & 1) ? 1 : 0);
+    if ([NSEvent pressedMouseButtons] & 1) [self.windowDragActive addObject:@(windowId)];
+    while (ring.count > 32) [ring removeObjectAtIndex:0];
+    NSRect lastRect = ring.lastObject.rectValue;
+    while (ring.count > 1 && lastRect.size.width - ring.firstObject.rectValue.size.width > 0.15) {
+        [ring removeObjectAtIndex:0];
+    }
+}
+
+/// Release velocity for the window from the move-sample ring, in
+/// points/second, top-left convention: newest sample against the oldest
+/// one more than one frame older, the same anchor the WebView
+/// renderer's computeVelocity used. Zero when the ring is cold.
+- (NSPoint)moveVelocityForWindowId:(uint64_t)windowId {
+    NSMutableArray<NSValue *> *ring = self.windowMoveSamples[@(windowId)];
+    if (ring.count < 2) return NSZeroPoint;
+    NSRect last = ring.lastObject.rectValue;
+    NSRect anchor = ring.firstObject.rectValue;
+    BOOL found = NO;
+    for (NSValue *value in ring) {
+        NSRect r = value.rectValue;
+        if (last.size.width - r.size.width > 0.016) { anchor = r; found = YES; break; }
+    }
+    if (!found) return NSZeroPoint;
+    double dt = last.size.width - anchor.size.width;
+    if (dt <= 0) return NSZeroPoint;
+    return NSMakePoint((last.origin.x - anchor.origin.x) / dt, (last.origin.y - anchor.origin.y) / dt);
+}
+
 // NSWindow.backgroundColor from the canvas packet's clear color, so any
 // residual gap (resize slack, the titlebar band before content lands)
 // shows the app's background instead of the system default. Applied on
@@ -10018,34 +10077,72 @@ int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t wind
     return 1;
 }
 
-int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp, double *out_x, double *out_y, int *out_hit_x, int *out_hit_y, int *out_primary_down) {
+int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp, double *out_x, double *out_y, int *out_hit_x, int *out_hit_y, int *out_primary_down, double *out_vx, double *out_vy, int *out_released, double *out_cursor_x, double *out_cursor_y) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
-    NSWindow *window = object.windows[@(window_id)];
-    if (!window) return 0;
-    NSRect frame = window.frame;
-    // dx/dy arrive in the pointer convention (y down); AppKit's origin
-    // is bottom-left, so dy subtracts.
-    double newX = frame.origin.x + dx;
-    double newY = frame.origin.y - dy;
-    BOOL hitX = NO, hitY = NO;
-    if (clamp) {
-        NSScreen *screen = window.screen ?: NSScreen.mainScreen;
-        NSRect visible = screen.visibleFrame;
-        double minX = visible.origin.x;
-        double maxX = NSMaxX(visible) - frame.size.width;
-        double minY = visible.origin.y;
-        double maxY = NSMaxY(visible) - frame.size.height;
-        if (newX < minX) { newX = minX; hitX = YES; }
-        if (newX > maxX) { newX = maxX; hitX = YES; }
-        if (newY < minY) { newY = minY; hitY = YES; }
-        if (newY > maxY) { newY = maxY; hitY = YES; }
-    }
-    if (dx != 0 || dy != 0) [window setFrameOrigin:NSMakePoint(newX, newY)];
-    if (out_x) *out_x = newX;
-    if (out_y) *out_y = newY;
+    __block int ok = 0;
+    __block double resX = 0, resY = 0;
+    __block BOOL hitX = NO, hitY = NO;
+    void (^work)(void) = ^{
+        NSWindow *window = object.windows[@(window_id)];
+        if (!window) return;
+        NSRect frame = window.frame;
+        // dx/dy arrive in the pointer convention (y down); AppKit's
+        // origin is bottom-left, so dy subtracts.
+        double newX = frame.origin.x + dx;
+        double newY = frame.origin.y - dy;
+        if (clamp) {
+            NSScreen *screen = window.screen ?: NSScreen.mainScreen;
+            NSRect visible = screen.visibleFrame;
+            double minX = visible.origin.x;
+            double maxX = NSMaxX(visible) - frame.size.width;
+            double minY = visible.origin.y;
+            double maxY = NSMaxY(visible) - frame.size.height;
+            if (newX < minX) { newX = minX; hitX = YES; }
+            if (newX > maxX) { newX = maxX; hitX = YES; }
+            if (newY < minY) { newY = minY; hitY = YES; }
+            if (newY > maxY) { newY = maxY; hitY = YES; }
+        }
+        if (dx != 0 || dy != 0) [window setFrameOrigin:NSMakePoint(newX, newY)];
+        // Report in the pointer convention (top-left origin, y down),
+        // the same space the deltas use, so callers integrate
+        // velocities without sign flips: y = distance from the top of
+        // the primary screen to the window's TOP edge.
+        double screenTop = NSMaxY(NSScreen.screens.firstObject.frame);
+        resX = newX;
+        resY = screenTop - (newY + frame.size.height);
+        ok = 1;
+    };
+    __block NSPoint velocity = NSZeroPoint;
+    __block int released = 0;
+    void (^velocityWork)(void) = ^{
+        NativeSdkAppKitHost *o = (__bridge NativeSdkAppKitHost *)host;
+        BOOL buttonDown = ([NSEvent pressedMouseButtons] & 1) != 0;
+        if (!buttonDown && [o.windowDragActive containsObject:@(window_id)]) {
+            released = 1;
+            velocity = [o moveVelocityForWindowId:window_id];
+            [o.windowDragActive removeObject:@(window_id)];
+            [o.windowMoveSamples removeObjectForKey:@(window_id)];
+        }
+    };
+    if (NSThread.isMainThread) { work(); velocityWork(); }
+    else dispatch_sync(dispatch_get_main_queue(), ^{ work(); velocityWork(); });
+    if (!ok) return 0;
+    if (out_released) *out_released = released;
+    if (out_vx) *out_vx = velocity.x;
+    if (out_vy) *out_vy = velocity.y;
+    if (out_x) *out_x = resX;
+    if (out_y) *out_y = resY;
     if (out_hit_x) *out_hit_x = hitX ? 1 : 0;
     if (out_hit_y) *out_hit_y = hitY ? 1 : 0;
     if (out_primary_down) *out_primary_down = ([NSEvent pressedMouseButtons] & 1) ? 1 : 0;
+    if (out_cursor_x || out_cursor_y) {
+        // Global cursor in the same top-left convention as the origin
+        // report, so callers compare the two without conversions.
+        NSPoint mouse = [NSEvent mouseLocation];
+        double screenTop = NSMaxY(NSScreen.screens.firstObject.frame);
+        if (out_cursor_x) *out_cursor_x = mouse.x;
+        if (out_cursor_y) *out_cursor_y = screenTop - mouse.y;
+    }
     return 1;
 }
 

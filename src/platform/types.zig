@@ -451,6 +451,19 @@ pub const MoveWindowResult = struct {
     hit_x: bool = false,
     hit_y: bool = false,
     primary_down: bool = false,
+    /// The window's recent velocity in points/second (top-left
+    /// convention), computed HOST-side from windowDidMove samples so it
+    /// stays truthful through native drags, where app-side event
+    /// pumping can stall inside the tracking loop.
+    vx: f64 = 0,
+    vy: f64 = 0,
+    /// One-shot: true on the first call after a primary-button drag of
+    /// this window ended. The host consumes the edge, so release
+    /// detection survives app-side event stalls during the drag.
+    released: bool = false,
+    /// Global cursor position, top-left convention, same space as x/y.
+    cursor_x: f64 = 0,
+    cursor_y: f64 = 0,
 };
 
 pub const FormFactor = enum(u8) {
