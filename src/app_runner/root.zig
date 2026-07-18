@@ -89,6 +89,9 @@ pub const RunOptions = struct {
             // shown after its first canvas frame presents, so launch
             // never flashes a blank window.
             info.main_window.titlebar = manifestShellStartupTitlebar();
+            info.main_window.floating = manifestShellStartupBool("floating");
+            info.main_window.transparent = manifestShellStartupBool("transparent");
+            info.main_window.click_through = manifestShellStartupBool("click_through");
             info.main_window.resizable = manifestShellStartupResizable();
             info.main_window.show = manifestShellStartupShowMode();
             // Min-size floors ride the create call like the titlebar:
@@ -154,6 +157,9 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
         .titlebar = windowTitlebarStyle(window),
+        .floating = windowBool(window, "floating", false),
+        .transparent = windowBool(window, "transparent", false),
+        .click_through = windowBool(window, "click_through", false),
         .min_width = windowMinSize(window, "min_width"),
         .min_height = windowMinSize(window, "min_height"),
     };
@@ -190,6 +196,17 @@ fn manifestShellStartupTitlebar() native_sdk.WindowTitlebarStyle {
     if (comptime !@hasField(@TypeOf(shell), "windows")) return .standard;
     if (comptime shell.windows.len == 0) return .standard;
     return windowTitlebarStyle(shell.windows[0]);
+}
+
+/// A boolean window-chrome flag from the startup shell window, fixed
+/// at create time like the titlebar style (floating, transparent,
+/// click_through).
+fn manifestShellStartupBool(comptime field: []const u8) bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return false;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return false;
+    if (comptime shell.windows.len == 0) return false;
+    return windowBool(shell.windows[0], field, false);
 }
 
 /// The startup window's resizability for scene-first apps: like the

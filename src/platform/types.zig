@@ -531,6 +531,17 @@ pub const WindowOptions = struct {
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
+    /// Keep the window above normal windows (macOS
+    /// NSFloatingWindowLevel). The desktop-companion shape: a small
+    /// always-visible window that accompanies other apps.
+    floating: bool = false,
+    /// Clear the surface to alpha 0 and let the OS composite the
+    /// window's pixels over the desktop. Pair with `.chromeless` for
+    /// non-rectangular companion windows.
+    transparent: bool = false,
+    /// The window never receives mouse events: clicks fall through to
+    /// whatever is behind it.
+    click_through: bool = false,
     show: WindowShowMode = .immediate,
     /// Content min-size floor the WINDOW enforces (macOS
     /// `contentMinSize`): the user cannot resize below it, so declared
@@ -588,6 +599,17 @@ pub const WindowCreateOptions = struct {
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
+    /// Keep the window above normal windows (macOS
+    /// NSFloatingWindowLevel). The desktop-companion shape: a small
+    /// always-visible window that accompanies other apps.
+    floating: bool = false,
+    /// Clear the surface to alpha 0 and let the OS composite the
+    /// window's pixels over the desktop. Pair with `.chromeless` for
+    /// non-rectangular companion windows.
+    transparent: bool = false,
+    /// The window never receives mouse events: clicks fall through to
+    /// whatever is behind it.
+    click_through: bool = false,
     show: WindowShowMode = .immediate,
     /// Window-enforced content min-size floor (see
     /// `WindowOptions.min_width`/`min_height`); 0 = no floor.

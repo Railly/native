@@ -324,6 +324,14 @@ pub const Window = struct {
     /// threaded through the platform create call, so the main window
     /// can hide its titlebar before the scene loads.
     titlebar: WindowTitlebarStyle = .standard,
+    /// Keep the window above normal windows on every desktop (macOS
+    /// NSFloatingWindowLevel; other hosts stage their equivalent).
+    floating: bool = false,
+    /// Transparent surface: clears to alpha 0 so the OS composites the
+    /// app's pixels straight over the desktop.
+    transparent: bool = false,
+    /// The window ignores mouse events entirely; clicks fall through.
+    click_through: bool = false,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor.
@@ -451,6 +459,14 @@ pub const ShellWindow = struct {
     /// create, and the scene's first window here should declare the
     /// SAME style so the two never disagree.
     titlebar: WindowTitlebarStyle = .standard,
+    /// Keep the window above normal windows on every desktop (macOS
+    /// NSFloatingWindowLevel; other hosts stage their equivalent).
+    floating: bool = false,
+    /// Transparent surface: clears to alpha 0 so the OS composites the
+    /// app's pixels straight over the desktop.
+    transparent: bool = false,
+    /// The window ignores mouse events entirely; clicks fall through.
+    click_through: bool = false,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor. Like
