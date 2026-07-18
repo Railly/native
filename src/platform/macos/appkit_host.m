@@ -3918,7 +3918,15 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     /* Encode. Everything is validated; failures past this point are
      * device-level and surface as -1 (present failure -> engine resync). */
     float clearComponents[4] = {0, 0, 0, 1};
-    {
+    // A transparent window owns its clear: alpha 0 regardless of the
+    // theme's background token, so the app's tokens stay normal (and
+    // adaptive) while the surface composites over the desktop.
+    if (self.window && !self.window.isOpaque) {
+        clearComponents[0] = 0;
+        clearComponents[1] = 0;
+        clearComponents[2] = 0;
+        clearComponents[3] = 0;
+    } else {
         NSColor *deviceClear = [clearColor colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace] ?: clearColor;
         CGFloat r = 0, g = 0, b = 0, a = 1;
         [deviceClear getRed:&r green:&g blue:&b alpha:&a];
