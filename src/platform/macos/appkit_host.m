@@ -4833,6 +4833,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!pixels || pixels.length != byteLengthRequired) return -1;
 
     NSColor *clearColor = [NSColor colorWithDeviceRed:(CGFloat)clearR / 255.0 green:(CGFloat)clearG / 255.0 blue:(CGFloat)clearB / 255.0 alpha:(CGFloat)clearA / 255.0];
+    // A transparent window owns its clear: alpha 0 regardless of the
+    // theme's background token, so the app keeps normal adaptive
+    // tokens while this surface composites over the desktop. Single
+    // override point: every packet path (draw, composite, present)
+    // receives this color.
+    if (self.window && !self.window.isOpaque) {
+        clearColor = [NSColor colorWithDeviceRed:0 green:0 blue:0 alpha:0];
+    }
     /* Retain keys parallel to the draw order feed the raster cache; a
      * packet without keys (JSON without commandKeys) draws direct. */
     NSArray *drawKeys = nil;
