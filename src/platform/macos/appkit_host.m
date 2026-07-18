@@ -4795,6 +4795,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
          * retained backing is not touched. Shares the retained-state
          * bookkeeping below via the same helper. */
         NSColor *compositeClearColor = [NSColor colorWithDeviceRed:(CGFloat)clearR / 255.0 green:(CGFloat)clearG / 255.0 blue:(CGFloat)clearB / 255.0 alpha:(CGFloat)clearA / 255.0];
+        // Same transparent-window override as the draw path below.
+        if (self.window && !self.window.isOpaque) {
+            compositeClearColor = [NSColor colorWithDeviceRed:0 green:0 blue:0 alpha:0];
+        }
         NSArray *compositeKeys = nil;
         if (patchLoadAction) {
             compositeKeys = self.canvasRetainedOrder;
