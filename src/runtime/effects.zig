@@ -3328,6 +3328,14 @@ pub fn Effects(comptime Msg: type) type {
         /// stopped, and the live primary-button state (dx=dy=0 reads
         /// without moving). Null under the fake executor or when no
         /// window actions are bound.
+        ///
+        /// NOT yet journaled: session replay runs on the fake executor
+        /// and reads null where the recording saw a result, so model
+        /// state derived from the result diverges under replay
+        /// verification. Feeding the result through the journal (the
+        /// `wallMs` replay-clock pattern) is the declared follow-up;
+        /// until then, apps that need replay-clean sessions should
+        /// treat the result as presentation-only.
         pub fn moveWindow(self: *Self, window_label: []const u8, dx: f64, dy: f64, clamp: bool) ?MoveWindowResult {
             if (self.executor == .fake) return null;
             const binding = self.window_actions orelse return null;

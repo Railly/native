@@ -2312,6 +2312,9 @@ fn runnerZig() []const u8 {
     \\            windowFloat(window, "height", 480),
     \\        ),
     \\        .resizable = windowBool(window, "resizable", true),
+    \\        .floating = windowBool(window, "floating", false),
+    \\        .transparent = windowBool(window, "transparent", false),
+    \\        .click_through = windowBool(window, "click_through", false),
     \\        .restore_state = windowBool(window, "restore_state", true),
     \\        .restore_policy = windowRestorePolicy(window),
     \\    };

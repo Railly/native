@@ -5401,7 +5401,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     descriptor.colorAttachments[0].texture = drawable.texture;
     descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
     descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
-    descriptor.colorAttachments[0].clearColor = MTLClearColorMake(red, green, blue, 1.0);
+    // A transparent window owns this clear too: before the first canvas
+    // texture (and while a resize leaves texture and drawable sizes
+    // mismatched) the opaque placeholder would flash a solid rectangle.
+    if (self.window && !self.window.isOpaque) {
+        descriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    } else {
+        descriptor.colorAttachments[0].clearColor = MTLClearColorMake(red, green, blue, 1.0);
+    }
 
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
     if (!commandBuffer) return;
