@@ -217,9 +217,11 @@ pub const WindowActionBinding = struct {
     close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     move_fn: *const fn (context: *anyopaque, window_label: []const u8, dx: f64, dy: f64, clamp: bool) ?MoveWindowResult,
+    resize_fn: *const fn (context: *anyopaque, window_label: []const u8, width: f64, height: f64, anchor: WindowResizeAnchor) bool,
 };
 
 pub const MoveWindowResult = platform.MoveWindowResult;
+pub const WindowResizeAnchor = platform.WindowResizeAnchor;
 
 /// Type-erased handle to the embedding host's named-command services,
 /// bound onto the effects channel (`bindHostCalls`). This is the seam
@@ -3340,6 +3342,16 @@ pub fn Effects(comptime Msg: type) type {
             if (self.executor == .fake) return null;
             const binding = self.window_actions orelse return null;
             return binding.move_fn(binding.context, window_label, dx, dy, clamp);
+        }
+
+        /// Resize a window to an exact size in screen points, keeping
+        /// the anchor fixed (`.top_left` or `.bottom_center`). False
+        /// under the fake executor, when no window actions are bound,
+        /// or when the host lacks the verb.
+        pub fn resizeWindow(self: *Self, window_label: []const u8, width: f64, height: f64, anchor: WindowResizeAnchor) bool {
+            if (self.executor == .fake) return false;
+            const binding = self.window_actions orelse return false;
+            return binding.resize_fn(binding.context, window_label, width, height, anchor);
         }
 
         /// Minimize a window by its declared label — the REAL OS verb

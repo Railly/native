@@ -2125,6 +2125,13 @@ int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t windo
     return 0;
 }
 
+int native_sdk_appkit_resize_window(native_sdk_appkit_host_t *host, uint64_t window_id, double width, double height, int anchor_bottom_center) {
+    // The Chromium host does not implement window resizing yet; 0 means
+    // "verb unavailable" (Effects.resizeWindow returns false).
+    (void)host; (void)window_id; (void)width; (void)height; (void)anchor_bottom_center;
+    return 0;
+}
+
 int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, int show_policy) {
     // Accepted for ABI parity; see native_sdk_appkit_create.
     (void)show_policy;

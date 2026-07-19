@@ -75,6 +75,7 @@ pub const isValidShortcutKey = types.isValidShortcutKey;
 pub const WindowRestorePolicy = types.WindowRestorePolicy;
 pub const WindowTitlebarStyle = types.WindowTitlebarStyle;
 pub const MoveWindowResult = types.MoveWindowResult;
+pub const WindowResizeAnchor = types.WindowResizeAnchor;
 pub const WindowChrome = types.WindowChrome;
 pub const FormFactor = types.FormFactor;
 pub const WindowDragRegion = types.WindowDragRegion;

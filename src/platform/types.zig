@@ -466,6 +466,14 @@ pub const MoveWindowResult = struct {
     cursor_y: f64 = 0,
 };
 
+/// Which point stays fixed when `resizeWindow` changes a window's size.
+pub const WindowResizeAnchor = enum {
+    top_left,
+    /// The bottom edge and horizontal center hold: a companion sprite
+    /// grows and shrinks in place on its ground line.
+    bottom_center,
+};
+
 pub const FormFactor = enum(u8) {
     unknown,
     compact,
@@ -2092,6 +2100,7 @@ pub const PlatformServices = struct {
     focus_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     move_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, dx: f64, dy: f64, clamp: bool) anyerror!MoveWindowResult = null,
+    resize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, width: f64, height: f64, anchor: WindowResizeAnchor) anyerror!void = null,
     /// The real OS minimize verb (macOS miniaturize-to-Dock, Windows
     /// `SW_MINIMIZE`, GTK `gtk_window_minimize`), for app-drawn window
     /// controls — chromeless windows have no system button to click.
@@ -2380,6 +2389,14 @@ pub const PlatformServices = struct {
     pub fn moveWindow(self: PlatformServices, window_id: WindowId, dx: f64, dy: f64, clamp: bool) anyerror!MoveWindowResult {
         const move_fn = self.move_window_fn orelse return error.UnsupportedService;
         return move_fn(self.context, window_id, dx, dy, clamp);
+    }
+
+    /// Resize a window to an exact size in screen points, keeping the
+    /// anchor fixed. Companion windows use it to fit the window to
+    /// their drawn content, so no invisible band eats clicks.
+    pub fn resizeWindow(self: PlatformServices, window_id: WindowId, width: f64, height: f64, anchor: WindowResizeAnchor) anyerror!void {
+        const resize_fn = self.resize_window_fn orelse return error.UnsupportedService;
+        return resize_fn(self.context, window_id, width, height, anchor);
     }
 
     pub fn minimizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {

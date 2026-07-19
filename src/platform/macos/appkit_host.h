@@ -360,6 +360,7 @@ int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t win
 int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height);
 int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp, double *out_x, double *out_y, int *out_hit_x, int *out_hit_y, int *out_primary_down, double *out_vx, double *out_vy, int *out_released, double *out_cursor_x, double *out_cursor_y);
+int native_sdk_appkit_resize_window(native_sdk_appkit_host_t *host, uint64_t window_id, double width, double height, int anchor_bottom_center);
 int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 // The real OS minimize verb (NSWindow miniaturize:), for app-drawn
 // window controls on chromeless windows. Returns 0 when the window id

@@ -1059,6 +1059,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = runtime,
                 .close_fn = effectsCloseWindowByLabel,
                 .move_fn = effectsMoveWindowByLabel,
+                .resize_fn = effectsResizeWindowByLabel,
                 .minimize_fn = effectsMinimizeWindowByLabel,
             });
             if (runtime.options.session_recorder) |recorder| {
@@ -3578,6 +3579,13 @@ fn effectsMoveWindowByLabel(context: *anyopaque, window_label: []const u8, dx: f
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return null;
     return runtime.options.platform.services.moveWindow(window_id, dx, dy, clamp) catch null;
+}
+
+fn effectsResizeWindowByLabel(context: *anyopaque, window_label: []const u8, width: f64, height: f64, anchor: platform.WindowResizeAnchor) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    runtime.options.platform.services.resizeWindow(window_id, width, height, anchor) catch return false;
+    return true;
 }
 
 fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) bool {

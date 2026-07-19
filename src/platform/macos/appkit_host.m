@@ -10176,6 +10176,31 @@ int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t windo
     return 1;
 }
 
+int native_sdk_appkit_resize_window(native_sdk_appkit_host_t *host, uint64_t window_id, double width, double height, int anchor_bottom_center) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    __block int ok = 0;
+    void (^work)(void) = ^{
+        NSWindow *window = object.windows[@(window_id)];
+        if (!window) return;
+        if (width <= 0 || height <= 0) return;
+        NSRect frame = window.frame;
+        double newX = frame.origin.x;
+        double newY = frame.origin.y;
+        if (anchor_bottom_center) {
+            // Keep the bottom edge and horizontal center fixed: a
+            // companion sprite grows and shrinks in place instead of
+            // hanging from its old top-left corner. AppKit's origin is
+            // bottom-left, so an unchanged origin.y keeps the bottom.
+            newX = frame.origin.x + (frame.size.width - width) / 2.0;
+        }
+        [window setFrame:NSMakeRect(newX, newY, width, height) display:YES];
+        ok = 1;
+    };
+    if (NSThread.isMainThread) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+    return ok;
+}
+
 int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
