@@ -6449,6 +6449,8 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     self.windowLabels = [[NSMutableDictionary alloc] init];
     self.deferredShowWindows = [[NSMutableDictionary alloc] init];
     self.windowClearColors = [[NSMutableDictionary alloc] init];
+    self.windowMoveSamples = [[NSMutableDictionary alloc] init];
+    self.windowDragActive = [[NSMutableSet alloc] init];
     self.childWebViews = [[NSMutableDictionary alloc] init];
     self.nativeViews = [[NSMutableDictionary alloc] init];
     self.adoptedViewSurfaces = [[NSMutableDictionary alloc] init];

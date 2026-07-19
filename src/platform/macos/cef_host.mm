@@ -1873,7 +1873,8 @@ static void NativeSdkApplyHiddenInsetTitlebar(NSWindow *window, int titlebar_sty
     }
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, int show_policy) {
+    (void)window_flags; // Companion chrome (floating/transparent/click-through) is AppKit-host-only for now.
     @autoreleasepool {
         // Present-before-show is a canvas contract; the Chromium host
         // hosts webviews only (gpu-surface presents are unsupported on
@@ -2107,9 +2108,27 @@ void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char 
     [object setShortcutsWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
 }
 
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy) {
+int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t window_id, double dx, double dy, int clamp, double *out_x, double *out_y, int *out_hit_x, int *out_hit_y, int *out_primary_down, double *out_vx, double *out_vy, int *out_released, double *out_cursor_x, double *out_cursor_y) {
+    // The Chromium host does not implement window movement yet; callers
+    // treat 0 as "verb unavailable" (Effects.moveWindow returns null).
+    (void)host; (void)window_id; (void)dx; (void)dy; (void)clamp;
+    if (out_x) *out_x = 0;
+    if (out_y) *out_y = 0;
+    if (out_hit_x) *out_hit_x = 0;
+    if (out_hit_y) *out_hit_y = 0;
+    if (out_primary_down) *out_primary_down = 0;
+    if (out_vx) *out_vx = 0;
+    if (out_vy) *out_vy = 0;
+    if (out_released) *out_released = 0;
+    if (out_cursor_x) *out_cursor_x = 0;
+    if (out_cursor_y) *out_cursor_y = 0;
+    return 0;
+}
+
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, int show_policy) {
     // Accepted for ABI parity; see native_sdk_appkit_create.
     (void)show_policy;
+    (void)window_flags; // Companion chrome (floating/transparent/click-through) is AppKit-host-only for now.
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"native-sdk";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
