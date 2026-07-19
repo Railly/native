@@ -2305,6 +2305,15 @@ test "mac gpu surface input maps pinch phases and carries the magnification delt
     try std.testing.expectEqual(@as(f32, 0), end.scale);
 }
 
+test "mac window flags pack companion chrome bits" {
+    const Flags = struct { floating: bool = false, transparent: bool = false, click_through: bool = false };
+    try std.testing.expectEqual(@as(c_int, 0), windowFlagsInt(Flags{}));
+    try std.testing.expectEqual(@as(c_int, 1), windowFlagsInt(Flags{ .floating = true }));
+    try std.testing.expectEqual(@as(c_int, 2), windowFlagsInt(Flags{ .transparent = true }));
+    try std.testing.expectEqual(@as(c_int, 4), windowFlagsInt(Flags{ .click_through = true }));
+    try std.testing.expectEqual(@as(c_int, 7), windowFlagsInt(Flags{ .floating = true, .transparent = true, .click_through = true }));
+}
+
 test "mac appearance event maps color scheme" {
     try std.testing.expectEqual(platform_mod.ColorScheme.light, appKitColorScheme(0));
     try std.testing.expectEqual(platform_mod.ColorScheme.dark, appKitColorScheme(1));

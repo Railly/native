@@ -284,6 +284,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             x: ?f32 = null,
             y: ?f32 = null,
             resizable: bool = true,
+            /// Companion-window chrome, fixed at create time like
+            /// `resizable` (see the manifest window fields of the same
+            /// names).
+            floating: bool = false,
+            transparent: bool = false,
+            click_through: bool = false,
             /// Content min-size floor the WINDOW enforces (macOS
             /// `contentMinSize`): the user's resize stops at the floor
             /// instead of the layout clamping/clipping panes below
@@ -1870,6 +1876,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .x = descriptor.x,
                 .y = descriptor.y,
                 .resizable = descriptor.resizable,
+                .floating = descriptor.floating,
+                .transparent = descriptor.transparent,
+                .click_through = descriptor.click_through,
                 .titlebar = descriptor.titlebar,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,

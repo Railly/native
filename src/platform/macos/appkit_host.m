@@ -1055,6 +1055,8 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     [self.host.windowLabels removeObjectForKey:key];
     [self.host.deferredShowWindows removeObjectForKey:key];
     [self.host.windowClearColors removeObjectForKey:key];
+    [self.host.windowMoveSamples removeObjectForKey:key];
+    [self.host.windowDragActive removeObject:key];
     if (self.host.windows.count == 0) {
         [self.host emitShutdown];
         [self.host stop];
@@ -6655,7 +6657,6 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     double t = [NSDate timeIntervalSinceReferenceDate];
     NSPoint p = NSMakePoint(frame.origin.x, screenTop - (frame.origin.y + frame.size.height));
     [ring addObject:[NSValue valueWithRect:NSMakeRect(p.x, p.y, t, 0)]];
-    NSLog(@"petdex-host: didMove sample win=%llu ring=%lu down=%d", windowId, (unsigned long)ring.count, ([NSEvent pressedMouseButtons] & 1) ? 1 : 0);
     if ([NSEvent pressedMouseButtons] & 1) [self.windowDragActive addObject:@(windowId)];
     while (ring.count > 32) [ring removeObjectAtIndex:0];
     NSRect lastRect = ring.lastObject.rectValue;

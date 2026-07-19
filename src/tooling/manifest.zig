@@ -594,6 +594,9 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .x = window.x,
             .y = window.y,
             .resizable = window.resizable,
+            .floating = window.floating,
+            .transparent = window.transparent,
+            .click_through = window.click_through,
             .restore_state = window.restore_state,
             .titlebar = try allocator.dupe(u8, window.titlebar),
             .min_width = window.min_width,
@@ -645,6 +648,9 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .x = window.x,
             .y = window.y,
             .resizable = window.resizable,
+            .floating = window.floating,
+            .transparent = window.transparent,
+            .click_through = window.click_through,
             .restore_state = window.restore_state,
             .restore_policy = try allocator.dupe(u8, window.restore_policy),
             .titlebar = try allocator.dupe(u8, window.titlebar),
@@ -845,6 +851,9 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .x = window.x,
             .y = window.y,
             .resizable = window.resizable,
+            .floating = window.floating,
+            .transparent = window.transparent,
+            .click_through = window.click_through,
             .restore_state = window.restore_state,
             .titlebar = try parseTitlebarStyle(window.titlebar),
             .min_width = try parseWindowMinSize(window.min_width),
@@ -882,6 +891,9 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .x = window.x,
             .y = window.y,
             .resizable = window.resizable,
+            .floating = window.floating,
+            .transparent = window.transparent,
+            .click_through = window.click_through,
             .restore_state = window.restore_state,
             .restore_policy = restore_policy,
             .titlebar = titlebar,
@@ -1780,7 +1792,7 @@ test "manifest parser reads window titlebar styles" {
         \\  .name = "example",
         \\  .version = "1.2.3",
         \\  .windows = .{
-        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset" },
+        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset", .floating = true, .transparent = true, .click_through = true },
         \\    .{ .label = "tall", .titlebar = "hidden_inset_tall" },
         \\    .{ .label = "skinned", .titlebar = "chromeless" },
         \\  },
@@ -1795,6 +1807,9 @@ test "manifest parser reads window titlebar styles" {
 
     try std.testing.expectEqualStrings("hidden_inset", metadata.windows[0].titlebar);
     try std.testing.expect(!metadata.windows[0].resizable);
+    try std.testing.expect(metadata.windows[0].floating);
+    try std.testing.expect(metadata.windows[0].transparent);
+    try std.testing.expect(metadata.windows[0].click_through);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.windows[1].titlebar);
     try std.testing.expectEqualStrings("chromeless", metadata.windows[2].titlebar);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.shell.windows[0].titlebar);
@@ -1803,6 +1818,9 @@ test "manifest parser reads window titlebar styles" {
     defer std.testing.allocator.free(windows);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset, windows[0].titlebar);
     try std.testing.expect(!windows[0].resizable);
+    try std.testing.expect(windows[0].floating);
+    try std.testing.expect(windows[0].transparent);
+    try std.testing.expect(windows[0].click_through);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, windows[1].titlebar);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.chromeless, windows[2].titlebar);
 
