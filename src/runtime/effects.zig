@@ -218,6 +218,7 @@ pub const WindowActionBinding = struct {
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     move_fn: *const fn (context: *anyopaque, window_label: []const u8, dx: f64, dy: f64, clamp: bool) ?MoveWindowResult,
     resize_fn: *const fn (context: *anyopaque, window_label: []const u8, width: f64, height: f64, anchor: WindowResizeAnchor) bool,
+    focus_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
 };
 
 pub const MoveWindowResult = platform.MoveWindowResult;
@@ -3352,6 +3353,16 @@ pub fn Effects(comptime Msg: type) type {
             if (self.executor == .fake) return false;
             const binding = self.window_actions orelse return false;
             return binding.resize_fn(binding.context, window_label, width, height, anchor);
+        }
+
+        /// Raise a window by its declared label and activate the app:
+        /// the "bring my window back" verb for a window the user sent
+        /// behind other apps. No-op under the fake executor or when no
+        /// window actions are bound.
+        pub fn focusWindow(self: *Self, window_label: []const u8) void {
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.focus_fn(binding.context, window_label);
         }
 
         /// Minimize a window by its declared label — the REAL OS verb
