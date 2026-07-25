@@ -297,6 +297,13 @@ struct Window {
      * app draws its header into the band while min/max/close, snap
      * layouts, and the resize borders stay the OS's own. */
     int titlebar_style = 0;
+    /* Companion-window chrome, fixed at create time like the titlebar
+     * style. The packed int arrives from the Zig seam with the AppKit
+     * host's bit order (bit 0 floating, bit 1 transparent, bit 2
+     * click-through) and is unpacked into these once. */
+    bool floating = false;
+    bool transparent = false;
+    bool click_through = false;
     /* Declared content min-size floor for user resizes; axes <= 0 keep
      * the natural minimum (WM_GETMINMAXINFO applies the floor). */
     double min_width = 0;
@@ -4675,6 +4682,28 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     switch (message) {
+        case WM_ERASEBKGND: {
+            /* Transparent companion windows erase to the color key
+             * instead of the class brush (COLOR_WINDOW, i.e. system
+             * white). The gpu_surface child covers the client area and
+             * paints its own background, so this only shows in the gaps
+             * a resize opens before the child catches up. With the
+             * default brush those gaps flash opaque white through the
+             * keyed window; keying them out makes them simply absent,
+             * which is what a cut-out companion window should show. */
+            const Window *window = windowForHwnd(host, hwnd);
+            if (window && window->transparent) {
+                RECT client = {};
+                GetClientRect(hwnd, &client);
+                HBRUSH brush = CreateSolidBrush(RGB(0, 0, 0));
+                if (brush) {
+                    FillRect(reinterpret_cast<HDC>(wparam), &client, brush);
+                    DeleteObject(brush);
+                    return 1;
+                }
+            }
+            break;
+        }
         case kWakeMessage:
             if (host) {
                 WindowsEvent wake = {};
@@ -4928,6 +4957,101 @@ static ATOM registerClass(Host *host) {
     return RegisterClassExW(&wc);
 }
 
+/* ------------------------------------------------------------------------
+ * Companion-window chrome on Win32 (the AppKit host's floating /
+ * transparent / click-through flags, same bit order).
+ *
+ * floating  -> WS_EX_TOPMOST. The direct analogue of
+ *              NSFloatingWindowLevel: the window sits above ordinary
+ *              windows without taking activation from them.
+ *
+ * transparent -> WS_EX_LAYERED plus a color-key. This is the design
+ *              decision worth stating, because the tempting answer is
+ *              wrong here. Per-pixel alpha on Win32 comes from
+ *              UpdateLayeredWindow (or WS_EX_LAYERED + a premultiplied
+ *              ULW_ALPHA bitmap), and it composites ONE bitmap supplied
+ *              for the whole layered window. It does not composite child
+ *              HWNDs at all. This host's presentation path is exactly
+ *              that: a gpu_surface is a child HWND of class
+ *              NativeSdkGpuSurface whose WM_PAINT blits the presented
+ *              DIB with SetDIBitsToDevice, and webviews are child HWNDs
+ *              owned by WebView2 that we do not rasterize at all.
+ *              Adopting UpdateLayeredWindow would mean abandoning the
+ *              child-HWND composition this host is built on, rewriting
+ *              the present path to render every view into one parent-
+ *              sized premultiplied bitmap, and it would still leave
+ *              WebView2 content unrepresentable. That is a rewrite of
+ *              the presentation architecture, not a port of a flag.
+ *              The color-key path (SetLayeredWindowAttributes with
+ *              LWA_COLORKEY) keeps child-HWND composition intact: the
+ *              DWM treats every pixel matching the key as absent, so the
+ *              sprite's cut-out border falls through to the desktop and
+ *              clicks land behind it. What it does NOT give is partial
+ *              alpha: a pixel is fully present or fully gone, so
+ *              antialiased sprite edges land hard rather than feathered.
+ *              That is the honest cost, and it is recorded in the
+ *              changelog next to the flag rather than hidden. The key is
+ *              pure black, matched to the alpha-zero clear the runtime
+ *              already performs for transparent windows, so the
+ *              renderer needs no Windows-specific behavior.
+ *
+ * click_through -> WS_EX_TRANSPARENT, which only behaves like
+ *              NSWindow.ignoresMouseEvents when the window is also
+ *              layered, so the layered bit is forced on with it. Hit
+ *              testing then skips the window entirely and the clicks
+ *              reach whatever is behind it.
+ *
+ * All three are extended styles applied after CreateWindowExW rather
+ * than passed into it, so the create call keeps one shape for every
+ * window and the flags stay one readable block. */
+/* Unpack the seam's packed chrome int onto a window. Both create paths
+ * (the host's first window and every later `windows_fn` window) funnel
+ * through here so the bit order is spelled out exactly once. */
+static void applyWindowFlags(Window &window, int window_flags) {
+    window.floating = (window_flags & 1) != 0;
+    window.transparent = (window_flags & 2) != 0;
+    window.click_through = (window_flags & 4) != 0;
+}
+
+static void applyCompanionWindowChrome(Window &window) {
+    if (!window.hwnd) return;
+    if (!window.floating && !window.transparent && !window.click_through) return;
+
+    if (window.floating) {
+        /* SWP_NOACTIVATE matters: a companion window that steals focus
+         * on every show is the opposite of the always-visible accessory
+         * shape this flag exists for. */
+        SetWindowPos(window.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    /* WS_EX_TRANSPARENT without WS_EX_LAYERED does not produce
+     * click-through on its own, so click_through implies layered even
+     * when transparency was not declared. */
+    const bool needs_layered = window.transparent || window.click_through;
+    if (!needs_layered) return;
+
+    LONG_PTR ex_style = GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE);
+    ex_style |= WS_EX_LAYERED;
+    if (window.click_through) ex_style |= WS_EX_TRANSPARENT;
+    SetWindowLongPtrW(window.hwnd, GWL_EXSTYLE, ex_style);
+
+    if (window.transparent) {
+        /* Pure black is the key because the runtime clears transparent
+         * windows to alpha zero, and the present path's swizzle writes
+         * those cleared pixels as 0,0,0 before forcing the ignored
+         * fourth byte to 255. Keying on black therefore drops exactly
+         * the pixels the app meant to leave empty. */
+        SetLayeredWindowAttributes(window.hwnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
+    } else {
+        /* Click-through without transparency: the window stays fully
+         * opaque, so the layered attributes must not remove anything.
+         * A full-alpha LWA_ALPHA is the no-op that keeps the layered
+         * bit meaningful (a layered window with no attributes set never
+         * paints). */
+        SetLayeredWindowAttributes(window.hwnd, 0, 255, LWA_ALPHA);
+    }
+}
+
 static bool createNativeWindow(Host *host, Window &window) {
     registerClass(host);
     std::wstring title = widen(window.title.empty() ? host->window_title : window.title);
@@ -4999,6 +5123,10 @@ static bool createNativeWindow(Host *host, Window &window) {
          * `window` referencing the stored map entry for exactly this. */
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
+    /* Before the first show, so a companion window never flashes as an
+     * opaque, non-topmost window for a frame on the way to its declared
+     * shape (the same reasoning as the caption color scheme above). */
+    applyCompanionWindowChrome(window);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     SetTimer(hwnd, kFrameTimerId, 16, nullptr);
@@ -5016,7 +5144,7 @@ size_t native_sdk_windows_clipboard_read_data(Host *host, const char *mime_type,
 int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
-Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height) {
     (void)restore_frame;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
@@ -5047,6 +5175,7 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.height = height;
     window.resizable = resizable != 0;
     window.titlebar_style = titlebar_style;
+    applyWindowFlags(window, window_flags);
     window.min_width = min_width;
     window.min_height = min_height;
     host->windows[window.id] = window;
@@ -5406,7 +5535,7 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
     }
 }
 
-int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height) {
     (void)restore_frame;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
@@ -5419,6 +5548,7 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.height = height;
     window.resizable = resizable != 0;
     window.titlebar_style = titlebar_style;
+    applyWindowFlags(window, window_flags);
     window.min_width = min_width;
     window.min_height = min_height;
     /* Register BEFORE creating: createNativeWindow's post-create frame
