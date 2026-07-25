@@ -559,6 +559,42 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "paint (GDK_PRIORITY_REDRAW," },
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "static void native_sdk_gpu_surface_schedule_frame_emission" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-companion-window-flags", "Verify the Linux host applies the same companion-window flag bits as the AppKit host", &.{
+        // The companion-window contract (bit 0 floating, bit 1
+        // transparent, bit 2 click-through) has to mean the SAME thing
+        // on both hosts, and this is the only place that can be pinned
+        // from macOS: gtk_host.c compiles only where GTK4 is installed,
+        // so nothing else in the local test run reads it. The bit
+        // definitions come first, then the one API per flag that is not
+        // interchangeable with a plausible-looking wrong one.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#define NATIVE_SDK_WINDOW_FLAG_FLOATING (1 << 0)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#define NATIVE_SDK_WINDOW_FLAG_TRANSPARENT (1 << 1)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#define NATIVE_SDK_WINDOW_FLAG_CLICK_THROUGH (1 << 2)" },
+        // Floating: GTK4 has no keep-above API at all (GTK3's was
+        // removed with no replacement), so the EWMH state hint is the
+        // whole mechanism. PropModeAppend and not Replace, because GTK
+        // writes its own states into the same list property.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "\"_NET_WM_STATE_ABOVE\"" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "XA_ATOM, 32, PropModeAppend" },
+        // Click-through: an EMPTY input region on the surface, which is
+        // the windowing-system-level pass-through. gtk_widget_set_can_target
+        // would compile and look right while only disabling hit-testing
+        // INSIDE this app, leaving the click to land on nothing.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "cairo_region_t *empty = cairo_region_create();" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "gdk_surface_set_input_region(surface, empty);" },
+        // Transparency: CSS is what paints the GTK4 window backdrop
+        // (set_app_paintable is gone), and box-shadow none is the
+        // counterpart of the AppKit host's hasShadow = NO.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "background-color: transparent;" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "box-shadow: none;" },
+        // Both surface-level flags need a realized GdkSurface, so they
+        // must ride the realize signal rather than run at create time.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "g_signal_connect(widget, \"realize\", G_CALLBACK(native_sdk_window_apply_click_through), NULL);" },
+        // The seam must carry the flags end to end, or every window is
+        // born with 0 and the flags silently do nothing.
+        .{ .path = "src/platform/linux/root.zig", .pattern = "fn windowFlagsInt(options: anytype) c_int {" },
+        .{ .path = "src/platform/linux/gtk_host.h", .pattern = "int titlebar_style, int window_flags, double min_width, double min_height);" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-audio-buffering-clears-on-noop-resume", "Verify the Linux audio buffering flag drops when the 100% resume completes synchronously", &.{
         // The buffering flag normally drops at the PLAYING
         // state-changed message. When the refill's earlier PAUSED

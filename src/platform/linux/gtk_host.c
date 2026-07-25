@@ -43,6 +43,48 @@ typedef struct native_sdk_absent_content_manager WebKitUserContentManager;
 #error "webkit/webkit.h not found: install the WebKitGTK 6.0 development package (libwebkitgtk-6.0-dev on Debian/Ubuntu), or define NATIVE_SDK_ALLOW_WEBKITGTK_STUB to build without the embedded web layer"
 #endif
 
+/* The X11 backend seam, for the ONE companion-window flag GTK4 has no
+ * portable API for: floating (keep-above). GTK3's
+ * gtk_window_set_keep_above was dropped outright in GTK4 and has no
+ * replacement anywhere on GtkWindow or GdkToplevel (the interface
+ * carries lower(), but nothing that raises into the always-on-top
+ * layer), so the stacking request has to be spoken to the window
+ * manager directly in the EWMH vocabulary. That vocabulary is X11-only:
+ * under Wayland a client cannot place itself above other clients at
+ * all, by protocol design, and the layer that CAN (wlr-layer-shell) is
+ * a compositor-specific extension GTK does not wrap. Hence the split
+ * below: X11 gets a real always-on-top window, Wayland gets a normal
+ * one with the flag reported as unsupported rather than silently
+ * pretending it worked.
+ *
+ * Same shape as the WebKitGTK seam above: the header is optional at
+ * compile time. libgtk-4-dev depends on libx11-dev, so the CI runner
+ * (and any normal Linux dev box) has it, but a GTK built for Wayland
+ * only would not, and that build should lose the floating flag rather
+ * than fail to compile. */
+#if defined(NATIVE_SDK_ALLOW_X11_STUB)
+#define NATIVE_SDK_HAS_X11 0
+#pragma message("X11 backend excluded by the build configuration: companion windows will not honor the floating flag")
+#elif __has_include(<gdk/x11/gdkx.h>) && __has_include(<X11/Xatom.h>)
+#include <gdk/x11/gdkx.h>
+#include <X11/Xatom.h>
+#define NATIVE_SDK_HAS_X11 1
+#else
+#define NATIVE_SDK_HAS_X11 0
+#pragma message("gdk/x11/gdkx.h not found: building the GTK host without the X11 backend (the floating window flag becomes a no-op)")
+#endif
+
+/* Companion-window chrome flags, the SAME bitmask the AppKit host
+ * applies in native_sdk_appkit_create (bit 0 floating, bit 1
+ * transparent, bit 2 click-through). The two hosts are meant to be read
+ * side by side: same bits, same order, same create-time-only semantics
+ * (a flag is fixed when the window is born, never toggled after). The
+ * packing lives in the Zig seam (windowFlagsInt) on both platforms; C
+ * only ever unpacks. */
+#define NATIVE_SDK_WINDOW_FLAG_FLOATING (1 << 0)
+#define NATIVE_SDK_WINDOW_FLAG_TRANSPARENT (1 << 1)
+#define NATIVE_SDK_WINDOW_FLAG_CLICK_THROUGH (1 << 2)
+
 #define NATIVE_SDK_MAX_WINDOWS 16
 #define NATIVE_SDK_MAX_WEBVIEWS 16
 #define NATIVE_SDK_MAX_TIMERS 64
@@ -311,6 +353,7 @@ struct native_sdk_gtk_host {
      * window does not exist yet when the host is created). */
     int init_resizable;
     int init_titlebar_style;
+    int init_window_flags;
     double init_min_width;
     double init_min_height;
 
@@ -2597,7 +2640,170 @@ static WebKitWebView *native_sdk_ensure_main_webview(native_sdk_gtk_window_t *wi
 }
 #endif /* NATIVE_SDK_HAS_WEBKITGTK */
 
-static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+/* Floating (bit 0), the X11 half. The AppKit host says
+ * `window.level = NSFloatingWindowLevel` in one line; X11 has no such
+ * property, so the equivalent is an EWMH state hint the window manager
+ * reads: _NET_WM_STATE containing _NET_WM_STATE_ABOVE.
+ *
+ * This runs at REALIZE time, before the surface is mapped, and writes
+ * the property directly with XChangeProperty instead of sending the
+ * _NET_WM_STATE ClientMessage. That is deliberate and it is the ordering
+ * the spec calls for: a client changing the state of an ALREADY MAPPED
+ * window must send the client message, but for a window that has not
+ * been mapped yet the WM "SHOULD honor _NET_WM_STATE whenever a
+ * withdrawn window requests to be mapped" (wm-spec 5.8). Setting the
+ * property pre-map means the window comes up above from its first
+ * frame; the ClientMessage route would map it at normal level and raise
+ * it one round trip later, which reads as a visible pop.
+ *
+ * A window manager is free to ignore the hint (the spec calls ABOVE a
+ * user preference), and a bare Xvfb with no WM running honors nothing at
+ * all: under CI the property is simply set and no one acts on it. That
+ * is correct and harmless: nothing else stacks above it there either. */
+#if NATIVE_SDK_HAS_X11
+static void native_sdk_window_apply_x11_above(GtkWidget *widget, gpointer data) {
+    (void)data;
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(widget));
+    if (!surface || !GDK_IS_X11_SURFACE(surface)) return;
+    GdkDisplay *display = gdk_surface_get_display(surface);
+    if (!display || !GDK_IS_X11_DISPLAY(display)) return;
+
+    Display *xdisplay = GDK_DISPLAY_XDISPLAY(display);
+    Window xid = GDK_SURFACE_XID(surface);
+    if (!xdisplay || xid == None) return;
+
+    Atom net_wm_state = gdk_x11_get_xatom_by_name_for_display(display, "_NET_WM_STATE");
+    Atom above = gdk_x11_get_xatom_by_name_for_display(display, "_NET_WM_STATE_ABOVE");
+    if (net_wm_state == None || above == None) return;
+
+    /* PropModeAppend, not Replace: _NET_WM_STATE is a LIST and GTK owns
+     * entries in it too (it writes the modal, fullscreen and maximized
+     * states through the same property). Replacing the list would drop
+     * whatever GTK had already put there. Append is safe here because
+     * this fires once per window, at realize, on a property the client
+     * has not yet added ABOVE to. */
+    XChangeProperty(xdisplay, xid, net_wm_state, XA_ATOM, 32, PropModeAppend,
+                    (const unsigned char *)&above, 1);
+}
+#endif /* NATIVE_SDK_HAS_X11 */
+
+/* Transparent (bit 1). The AppKit host clears three properties
+ * (opaque = NO, clearColor background, hasShadow = NO); GTK4 needs the
+ * same three things said in its own terms, and only one of them is a
+ * direct API call.
+ *
+ * 1. The background. GTK4 removed gtk_widget_set_app_paintable and the
+ *    GTK3 draw-handler override along with it; what paints the window's
+ *    opaque backdrop now is CSS, the `background-color` of the `window`
+ *    node (and of the `.background` style class GtkWindow carries). So
+ *    the way to not paint it is a CSS provider that sets it
+ *    transparent. The rule is scoped to a class this host adds to the
+ *    one window that asked, never a bare `window {}` rule, so a
+ *    transparent companion cannot bleach the app's normal windows.
+ * 2. The alpha channel. A transparent background only shows through if
+ *    the surface has one. GTK4 gives the toplevel an RGBA visual
+ *    automatically when the display has a compositor, which is why
+ *    there is no set_visual call here (GTK3's gtk_widget_set_visual is
+ *    also gone). Without a compositing manager the alpha has nowhere to
+ *    go and the window falls back to black or garbage behind the
+ *    content, which is a property of the desktop, not of this code.
+ * 3. The shadow. GTK draws the client-side drop shadow as part of the
+ *    window's own CSS box, so the same rule kills it: box-shadow none
+ *    on the decoration node. Exactly the reason the AppKit host sets
+ *    hasShadow = NO: a shadow is computed from the frame RECTANGLE and
+ *    paints a ghost box behind non-rectangular content.
+ *
+ * Worth recording, because the Win32 host had to give up per-pixel
+ * alpha here and GTK does not: the canvas presents through a
+ * GtkDrawingArea whose draw func blits a CAIRO_FORMAT_ARGB32 image with
+ * cairo_paint (the default OVER operator), so an app that renders
+ * transparent pixels keeps them all the way to the compositor. Nothing
+ * in the present path flattens alpha against an opaque backdrop, and
+ * the views are real widgets inside the one toplevel surface rather
+ * than the child HWNDs that force the Win32 host to composite opaquely.
+ * So on GTK the transparent flag is genuinely per-pixel. */
+static void native_sdk_window_apply_transparent(native_sdk_gtk_window_t *win) {
+    if (!win || !win->gtk_window) return;
+    GtkWidget *widget = GTK_WIDGET(win->gtk_window);
+    gtk_widget_add_css_class(widget, "native-sdk-transparent-window");
+
+    GtkCssProvider *provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(
+        provider,
+        ".native-sdk-transparent-window,"
+        ".native-sdk-transparent-window decoration,"
+        ".native-sdk-transparent-window .background {"
+        "  background-color: transparent;"
+        "  background-image: none;"
+        "  box-shadow: none;"
+        "}");
+    /* Display-wide provider (there is no per-widget provider in GTK4;
+     * gtk_style_context_add_provider is deprecated and the display is
+     * the supported scope), which is exactly why the selector is class
+     * scoped. APPLICATION priority, not USER: the app's own stylesheet
+     * stays able to override this. */
+    gtk_style_context_add_provider_for_display(
+        gtk_widget_get_display(widget),
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+}
+
+/* Click-through (bit 2). The AppKit host sets ignoresMouseEvents = YES
+ * and the whole window stops taking input.
+ *
+ * gtk_widget_set_can_target(FALSE) is NOT the equivalent and is not what
+ * this uses: that is an intra-application hit-testing flag, so the
+ * pointer still belongs to this window and the app underneath never
+ * sees the click, it just lands on nothing. Real click-through is a
+ * windowing-system concept: the surface has to declare an empty INPUT
+ * REGION so the display server routes those events to whatever is
+ * behind. gdk_surface_set_input_region with an empty cairo region is
+ * the documented way, and the docs name this exact pairing (an input
+ * region "is typically used with RGBA surfaces", the alpha deciding
+ * what is visible and the region deciding what is clickable).
+ *
+ * Applied at realize like the floating flag, because the input region
+ * lives on the GdkSurface, which does not exist until then. Not every
+ * backend implements input shapes (gdk_display_supports_input_shapes
+ * reports it); where it is unsupported the call is a no-op and the
+ * window keeps taking clicks, which is the honest degradation. */
+static void native_sdk_window_apply_click_through(GtkWidget *widget, gpointer data) {
+    (void)data;
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(widget));
+    if (!surface) return;
+    /* An EMPTY region, not a NULL one: passing NULL RESETS the input
+     * region to the whole surface, the opposite of the intent. */
+    cairo_region_t *empty = cairo_region_create();
+    if (!empty) return;
+    gdk_surface_set_input_region(surface, empty);
+    cairo_region_destroy(empty);
+}
+
+/* Unpack the companion-window flags onto a freshly built window, in the
+ * same bit order the AppKit host reads them. Split by WHEN each one can
+ * be applied: transparency is pure CSS and lands immediately, while
+ * floating and click-through both need a live GdkSurface (an X11 window
+ * id, an input region) that only exists from realize onward, so they
+ * ride the realize signal. Create-time only, like the titlebar style. */
+static void native_sdk_window_apply_flags(native_sdk_gtk_window_t *win, int window_flags) {
+    if (!win || !win->gtk_window || window_flags == 0) return;
+    GtkWidget *widget = GTK_WIDGET(win->gtk_window);
+
+    if (window_flags & NATIVE_SDK_WINDOW_FLAG_FLOATING) {
+#if NATIVE_SDK_HAS_X11
+        g_signal_connect(widget, "realize", G_CALLBACK(native_sdk_window_apply_x11_above), NULL);
+#endif
+    }
+    if (window_flags & NATIVE_SDK_WINDOW_FLAG_TRANSPARENT) {
+        native_sdk_window_apply_transparent(win);
+    }
+    if (window_flags & NATIVE_SDK_WINDOW_FLAG_CLICK_THROUGH) {
+        g_signal_connect(widget, "realize", G_CALLBACK(native_sdk_window_apply_click_through), NULL);
+    }
+}
+
+static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height) {
     if (native_sdk_find_window(host, window_id)) return NULL;
 
     int slot = -1;
@@ -2710,6 +2916,12 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     gtk_window_set_child(win->gtk_window, win->root_box);
     native_sdk_install_file_drop_target(win);
 
+    /* Companion-window chrome, applied after the chassis exists so the
+     * transparent rule reaches a window that already carries its
+     * decoration node, and after the child tree is set so nothing later
+     * repaints an opaque background over it. */
+    native_sdk_window_apply_flags(win, window_flags);
+
     g_signal_connect(win->gtk_window, "notify::default-width", G_CALLBACK(on_resize), win);
     g_signal_connect(win->gtk_window, "notify::default-height", G_CALLBACK(on_resize), win);
     g_signal_connect(win->gtk_window, "notify::is-active", G_CALLBACK(on_focus), win);
@@ -2732,7 +2944,7 @@ static void on_activate(GtkApplication *app, gpointer data) {
         host->init_width > 0 ? host->init_width : 720,
         host->init_height > 0 ? host->init_height : 480,
         host->restore_frame, host->init_resizable, host->init_titlebar_style,
-        host->init_min_width, host->init_min_height);
+        host->init_window_flags, host->init_min_width, host->init_min_height);
     if (!win) return;
 
     gtk_window_present(win->gtk_window);
@@ -2754,7 +2966,7 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     const char *icon_path, size_t icon_path_len,
     const char *window_label, size_t window_label_len,
     double x, double y, double width, double height,
-    int restore_frame, int resizable, int titlebar_style,
+    int restore_frame, int resizable, int titlebar_style, int window_flags,
     double min_width, double min_height)
 {
     native_sdk_gtk_host_t *host = calloc(1, sizeof(native_sdk_gtk_host_t));
@@ -2772,6 +2984,7 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     host->restore_frame = restore_frame;
     host->init_resizable = resizable;
     host->init_titlebar_style = titlebar_style;
+    host->init_window_flags = window_flags;
     host->init_min_width = min_width;
     host->init_min_height = min_height;
 
@@ -3229,10 +3442,10 @@ void native_sdk_gtk_set_shortcuts(native_sdk_gtk_host_t *host, const char *const
     }
 }
 
-int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height) {
     char *title = window_title_len > 0 ? native_sdk_strndup(window_title, window_title_len) : NULL;
     char *label = window_label_len > 0 ? native_sdk_strndup(window_label, window_label_len) : NULL;
-    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, min_width, min_height);
+    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, window_flags, min_width, min_height);
     free(title);
     free(label);
     if (!win) return 0;

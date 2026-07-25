@@ -102,7 +102,7 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) ?*GtkHost;
+extern fn native_sdk_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, window_flags: c_int, min_width: f64, min_height: f64) ?*GtkHost;
 extern fn native_sdk_gtk_destroy(host: *GtkHost) void;
 extern fn native_sdk_gtk_run(host: *GtkHost, callback: GtkCallback, context: ?*anyopaque) void;
 extern fn native_sdk_gtk_stop(host: *GtkHost) void;
@@ -119,7 +119,7 @@ extern fn native_sdk_gtk_emit_window_event(host: *GtkHost, window_id: u64, name:
 extern fn native_sdk_gtk_set_security_policy(host: *GtkHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_gtk_set_menus(host: *GtkHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_gtk_set_shortcuts(host: *GtkHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, window_flags: c_int, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_gtk_start_window_drag(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_set_window_drag_regions(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_gtk_window_chrome(host: *GtkHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -231,7 +231,7 @@ pub const LinuxPlatform = struct {
         const window_options = app_info.resolvedMainWindow();
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = native_sdk_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
+        const host = native_sdk_gtk_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), windowFlagsInt(window_options), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -694,6 +694,21 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
     };
 }
 
+/// Window-chrome flags packed for the C seam: bit 0 floating, bit 1
+/// transparent, bit 2 click-through. The bit order is the AppKit host's
+/// (`macos/root.zig` windowFlagsInt) on purpose, and the Win32 host packs
+/// the same one: a single manifest declaration crosses all three seams as
+/// the same integer, so a flag can never mean one thing on one host and
+/// something else on another. One int also keeps the create signatures
+/// from growing a parameter per flag.
+fn windowFlagsInt(options: anytype) c_int {
+    var flags: c_int = 0;
+    if (options.floating) flags |= 1;
+    if (options.transparent) flags |= 2;
+    if (options.click_through) flags |= 4;
+    return flags;
+}
+
 /// Zero/negative/non-finite floors are the "no floor" sentinel (the
 /// host leaves that axis at its natural minimum).
 fn minSizeFloor(value: f32) f64 {
@@ -704,7 +719,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
+    if (native_sdk_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), windowFlagsInt(options), minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
     return .{
         .id = options.id,
         .label = options.label,
@@ -1356,6 +1371,20 @@ fn isSupportedNativeViewKind(kind: platform_mod.ViewKind) bool {
         .webview,
         => false,
     };
+}
+
+test "linux window flags pack companion chrome bits" {
+    // The same expectations as the AppKit seam's "mac window flags pack
+    // companion chrome bits", asserted verbatim on purpose: all three
+    // hosts unpack this int with the same bitmask, so if one side's
+    // packing ever drifts, the tests disagree instead of a companion
+    // window silently coming up with the wrong chrome on one platform.
+    const Flags = struct { floating: bool = false, transparent: bool = false, click_through: bool = false };
+    try std.testing.expectEqual(@as(c_int, 0), windowFlagsInt(Flags{}));
+    try std.testing.expectEqual(@as(c_int, 1), windowFlagsInt(Flags{ .floating = true }));
+    try std.testing.expectEqual(@as(c_int, 2), windowFlagsInt(Flags{ .transparent = true }));
+    try std.testing.expectEqual(@as(c_int, 4), windowFlagsInt(Flags{ .click_through = true }));
+    try std.testing.expectEqual(@as(c_int, 7), windowFlagsInt(Flags{ .floating = true, .transparent = true, .click_through = true }));
 }
 
 test "linux supports native container and control kinds" {
