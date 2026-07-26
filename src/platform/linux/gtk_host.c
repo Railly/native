@@ -3499,7 +3499,13 @@ void native_sdk_gtk_set_menus(native_sdk_gtk_host_t *host, const char *const *me
             g_object_unref(gitem);
 
             char *accel = native_sdk_menu_accel(key, item_modifiers[item_index]);
-            if (accel && accel[0]) {
+            /* host->app is checked for the same reason the clearing pass
+             * above checks it: a host built without a GtkApplication
+             * reaches here with a NULL app, and the call then fails its
+             * GTK_IS_APPLICATION assertion and takes the menu build with
+             * it. The accelerator is the part that is optional, not the
+             * menu. */
+            if (accel && accel[0] && host->app) {
                 const char *accels[] = { accel, NULL };
                 gtk_application_set_accels_for_action(host->app, detailed, accels);
             }
