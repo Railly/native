@@ -155,6 +155,20 @@ constexpr UINT kAudioSessionMessage = WM_APP + 45;
 constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
+/* COPYDATASTRUCT::dwData tag on the single-instance forward. dwData is
+ * app-defined, so it is the only in-band way to tell OUR forward from
+ * any other WM_COPYDATA a same-session process may send to this window;
+ * it is a discriminator, not a secret (see acceptForwardedUrls). */
+constexpr ULONG_PTR kForwardedUrlsTag = 0x4E53'5544ull; /* 'NSUD' */
+/* Same channel, empty payload: a secondary launched with no link asking
+ * the primary to come forward. */
+constexpr ULONG_PTR kRaisePrimaryTag = 0x4E53'5250ull; /* 'NSRP' */
+/* Mirrors max_open_urls_bytes in src/platform/types.zig: the runtime
+ * decodes the payload into that fixed cap, so anything past it could
+ * not survive the seam anyway. Bounding here keeps a hostile sender
+ * from making the host allocate on its say-so. */
+constexpr size_t kMaxForwardedUrlsBytes = 8192;
+
 constexpr int kViewWebView = 0;
 constexpr int kViewToolbar = 1;
 constexpr int kViewTitlebarAccessory = 2;
@@ -582,6 +596,22 @@ struct Host {
     /* Whether the CoInitializeEx in native_sdk_windows_create succeeded
      * and native_sdk_windows_destroy owes the balancing CoUninitialize. */
     bool com_initialized = false;
+    /* Single-instance channel. The mutex is this process's claim on the
+     * primary role, held for the whole run and released by CloseHandle
+     * in destroy; the message-only window is the address secondary
+     * instances forward deep links to. Both null in a secondary. */
+    HANDLE instance_mutex = nullptr;
+    HWND instance_window = nullptr;
+    /* True when another instance already held the mutex at create time:
+     * run forwards this process's links and returns without showing a
+     * window or entering the message loop. */
+    bool is_secondary = false;
+    /* URLs forwarded by a secondary before the run loop set the
+     * callback. Only reachable in the window between the message window
+     * existing and native_sdk_windows_run emitting START, but a link
+     * clicked in that window must not be dropped — the buffering the
+     * cold-launch path and macOS's flushPendingOpenURLs already do. */
+    std::string pending_forwarded_urls;
     AudioState audio;
     AudioSpectrumState spectrum;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
@@ -1229,6 +1259,221 @@ static std::string commandLineUrls() {
     }
     LocalFree(argv);
     return urls;
+}
+
+/* ------------------------------------------------------------------------
+ * Single instance.
+ *
+ * The scheme registration package.zig writes is a registry command, so
+ * every click on a deep link starts a NEW process with the URL as an
+ * argument. Without a channel the second process emits the event from
+ * its own startup and dies, and the running app never hears the link
+ * (see commandLineUrls above). GTK gets this free: GApplication routes
+ * ::open to the primary instance.
+ *
+ * Two pieces, both named off the BUNDLE ID, never off an SDK-global
+ * constant: two different apps built with this SDK must not collide
+ * into one instance. The existing window class is exactly that mistake
+ * waiting to happen — L"NativeSdkWindowsHost" is shared by every app,
+ * so FindWindowW over it would hand a link to whichever SDK app
+ * happened to be running. Hence a dedicated class per bundle id.
+ *
+ * A message-only window (HWND_MESSAGE) rather than the app's real
+ * window: it exists before any window is shown, cannot be enumerated or
+ * activated by accident, receives no broadcasts, and is found by
+ * FindWindowExW(HWND_MESSAGE, ...) — note plain FindWindowW does NOT
+ * search message-only windows, which is why the lookup below passes
+ * HWND_MESSAGE as the parent.
+ *
+ * The mutex only DECIDES the role; the window is the address. The mutex
+ * is created with bInitialOwner FALSE, so no thread owns it and no
+ * ReleaseMutex is owed: its existence, not its signal state, is the
+ * claim. A named mutex is guessable by design, so a hostile local
+ * process can squat it and keep this app from ever becoming primary.
+ * That is the documented limitation of the technique and it costs
+ * availability, not integrity: everything that crosses the wire is
+ * re-validated on arrival. */
+
+static std::wstring instanceChannelSuffix(const std::string &bundle_id) {
+    /* Kernel object names take any character but backslash, and window
+     * class names are likewise unconstrained in practice, but a bundle
+     * id reaches here straight from app manifest text. Fold anything
+     * outside [A-Za-z0-9.-] to '_' so a stray backslash cannot smuggle
+     * a namespace prefix ("Global\...") into the mutex name. Empty
+     * bundle id falls back to a constant: apps that declare none share
+     * an instance, which is strictly better than the name being
+     * whatever the empty string produces. */
+    std::string safe;
+    for (char ch : bundle_id) {
+        const bool keep = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-';
+        safe.push_back(keep ? ch : '_');
+    }
+    if (safe.empty()) safe = "default";
+    /* CreateMutexW caps names at MAX_PATH; the prefixes below are the
+     * longest of the two, so budget against it once here. */
+    constexpr size_t kMaxSuffix = MAX_PATH - 48;
+    if (safe.size() > kMaxSuffix) safe.resize(kMaxSuffix);
+    return widen(safe);
+}
+
+/* Local\ (session namespace), not Global\: single instance means one
+ * per logged-in user. Two users in a fast-user-switching session each
+ * get their own app, and a Global name would also need an explicit
+ * security descriptor to be openable across sessions. */
+static std::wstring instanceMutexName(const std::string &bundle_id) {
+    return L"Local\\native-sdk.instance." + instanceChannelSuffix(bundle_id);
+}
+
+static std::wstring instanceWindowClassName(const std::string &bundle_id) {
+    return L"native-sdk.ipc." + instanceChannelSuffix(bundle_id);
+}
+
+/* The one piece of this file that is pure and therefore testable off
+ * Windows: what a primary accepts from a stranger's WM_COPYDATA.
+ *
+ * WM_COPYDATA is receivable from ANY process in the session, so the
+ * payload is untrusted input, not a courtesy from our own secondary.
+ * Three gates, all necessary:
+ *   - non-empty and within the cap the runtime can actually decode, so
+ *     a sender cannot drive an unbounded copy;
+ *   - no trailing garbage past the last URL is tolerated implicitly —
+ *     every NUL-separated field must itself parse;
+ *   - EVERY field must look like a URI, because the event this feeds
+ *     is a deep-link event and a caller must not be able to inject a
+ *     file path (or arbitrary text) through it.
+ * Rejection is all-or-nothing: a partially valid batch is a malformed
+ * batch, and silently dropping a field would emit a link set the sender
+ * did not send. */
+static bool acceptForwardedUrls(const char *bytes, size_t len, std::string *out) {
+    if (out) out->clear();
+    if (!bytes || len == 0 || len > kMaxForwardedUrlsBytes) return false;
+    /* One NUL of terminator on the last field is conventional, so trim
+     * it before splitting; anything past that is the sender packing
+     * blank fields, which the empty-field check below rejects. */
+    size_t span = len;
+    if (bytes[span - 1] == '\0') --span;
+    if (span == 0) return false;
+    std::string accepted;
+    size_t start = 0;
+    for (size_t index = 0; index <= span; ++index) {
+        if (index < span && bytes[index] != '\0') continue;
+        /* An empty field means the sender packed a blank URL; the batch
+         * is malformed, and dropping the field silently would emit a
+         * link set nobody sent. */
+        if (index == start) return false;
+        const std::string field(bytes + start, index - start);
+        if (!looksLikeUri(field)) return false;
+        if (!accepted.empty()) accepted.push_back('\0');
+        accepted.append(field);
+        start = index + 1;
+    }
+    if (accepted.empty()) return false;
+    if (out) *out = accepted;
+    return true;
+}
+
+/* Brings the primary's UI forward when a secondary launched with no
+ * link (a second double-click on the exe). SetForegroundWindow is
+ * subject to the foreground lock; the secondary calls
+ * AllowSetForegroundWindow first to hand its own right over, which is
+ * exactly the sanctioned case since the secondary was itself started by
+ * user input. Restores a minimized window, because raising a window
+ * that is iconic is a no-op the user reads as "nothing happened". */
+static void raiseHostWindows(Host *host) {
+    if (!host) return;
+    HWND hwnd = parentWindow(host);
+    if (!hwnd) return;
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+}
+
+static void deliverForwardedUrls(Host *host, const std::string &urls) {
+    if (!host || urls.empty()) return;
+    /* Before the run loop installs the callback there is nowhere to
+     * emit; hold it and let native_sdk_windows_run flush after START,
+     * the same ordering the cold-launch link gets. */
+    if (!host->callback) {
+        host->pending_forwarded_urls = urls;
+        return;
+    }
+    emitOpenedUrls(host, urls);
+}
+
+static LRESULT CALLBACK instanceWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_COPYDATA) {
+        Host *host = reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        const COPYDATASTRUCT *data = reinterpret_cast<const COPYDATASTRUCT *>(lparam);
+        if (!host || !data) return FALSE;
+        if (data->dwData == kRaisePrimaryTag) {
+            raiseHostWindows(host);
+            return TRUE;
+        }
+        if (data->dwData != kForwardedUrlsTag) return FALSE;
+        std::string urls;
+        /* lpData is only valid for the duration of this message, so
+         * acceptForwardedUrls copies into `urls` before anything else
+         * touches it. */
+        if (!acceptForwardedUrls(reinterpret_cast<const char *>(data->lpData), (size_t)data->cbData, &urls)) return FALSE;
+        deliverForwardedUrls(host, urls);
+        /* A forwarded link is a user action on this app, so surface it
+         * the way a cold launch would. */
+        raiseHostWindows(host);
+        return TRUE;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static HWND createInstanceWindow(Host *host) {
+    const std::wstring class_name = instanceWindowClassName(host->bundle_id);
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = instanceWindowProc;
+    wc.hInstance = host->instance;
+    wc.lpszClassName = class_name.c_str();
+    /* A class name already taken by this process is not an error here:
+     * only ERROR_CLASS_ALREADY_EXISTS, and the existing registration is
+     * ours and identical. */
+    RegisterClassExW(&wc);
+    HWND hwnd = CreateWindowExW(0, class_name.c_str(), L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, host->instance, nullptr);
+    if (!hwnd) return nullptr;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(host));
+    return hwnd;
+}
+
+/* Sends this process's command-line URLs to the primary and reports
+ * whether the primary took them. SendMessageW, not PostMessageW:
+ * WM_COPYDATA passes a pointer into this process's memory that the
+ * system marshals only for the duration of a synchronous send, and the
+ * secondary exits immediately after. */
+static bool forwardUrlsToPrimary(const std::string &bundle_id, const std::string &urls) {
+    const std::wstring class_name = instanceWindowClassName(bundle_id);
+    HWND primary = FindWindowExW(HWND_MESSAGE, nullptr, class_name.c_str(), nullptr);
+    if (!primary) return false;
+    /* Let the primary take the foreground: this process holds that
+     * right (the user just launched it) and gives it away for the
+     * raise the primary does on arrival. */
+    DWORD primary_pid = 0;
+    GetWindowThreadProcessId(primary, &primary_pid);
+    if (primary_pid != 0) AllowSetForegroundWindow(primary_pid);
+    if (urls.empty()) {
+        /* No link to hand over, so nothing to validate: a zero-byte
+         * WM_COPYDATA would just be rejected. An empty-payload tag on
+         * the same message asks the primary to raise, so a bare
+         * relaunch behaves like clicking the app in the taskbar rather
+         * than opening a second copy of a single-instance app. */
+        COPYDATASTRUCT raise = {};
+        raise.dwData = kRaisePrimaryTag;
+        raise.cbData = 0;
+        raise.lpData = nullptr;
+        SendMessageW(primary, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&raise));
+        return true;
+    }
+    if (urls.size() > kMaxForwardedUrlsBytes) return false;
+    COPYDATASTRUCT data = {};
+    data.dwData = kForwardedUrlsTag;
+    data.cbData = (DWORD)urls.size();
+    data.lpData = const_cast<char *>(urls.data());
+    return SendMessageW(primary, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data)) != 0;
 }
 
 static void emitFileDrop(Host *host, const Window &window, const std::string &paths) {
@@ -5232,6 +5477,26 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     host->window_title = slice(window_title, window_title_len);
     host->bundle_id = slice(bundle_id, bundle_id_len);
     host->icon_path = slice(icon_path, icon_path_len);
+    /* Claim the primary role here rather than in run: create is the
+     * first host call and the window map below is already the app's
+     * declared UI, so a secondary must be told before anything shows.
+     * bInitialOwner FALSE — existence is the claim, not ownership (see
+     * the single-instance block). A NULL handle means the mutex could
+     * not be created at all, which is not evidence of a primary; the
+     * safe reading is "this process is on its own", so it proceeds as
+     * primary and the channel simply does not work. */
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, instanceMutexName(host->bundle_id).c_str());
+    const bool secondary = mutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS;
+    if (secondary) {
+        /* Do not hold a handle to another process's mutex for the life
+         * of this one: this process is about to exit in run. */
+        CloseHandle(mutex);
+        host->instance_mutex = nullptr;
+        host->is_secondary = true;
+    } else {
+        host->instance_mutex = mutex;
+        host->instance_window = createInstanceWindow(host);
+    }
     Window window;
     window.id = 1;
     window.label = slice(window_label, window_label_len);
@@ -5272,6 +5537,21 @@ void native_sdk_windows_destroy(Host *host) {
     audioReleaseSession(host, true);
     removeNotificationIcon(host);
     destroyAllWindows(host);
+    /* Drop the single-instance claim last, and the window before the
+     * mutex: once the mutex is gone the next launch becomes primary,
+     * and it must not find this dying process's message window still
+     * answering. The USERDATA pointer is cleared because a WM_COPYDATA
+     * that arrives between DestroyWindow being queued and the window
+     * going away must not reach the host being deleted below. */
+    if (host->instance_window) {
+        SetWindowLongPtrW(host->instance_window, GWLP_USERDATA, 0);
+        DestroyWindow(host->instance_window);
+        host->instance_window = nullptr;
+    }
+    if (host->instance_mutex) {
+        CloseHandle(host->instance_mutex);
+        host->instance_mutex = nullptr;
+    }
     const bool com_initialized = host->com_initialized;
     delete host;
     if (com_initialized) CoUninitialize();
@@ -5279,6 +5559,20 @@ void native_sdk_windows_destroy(Host *host) {
 
 void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
     if (!host) return;
+    /* A secondary instance hands its links to the primary and returns
+     * without a window, a START, or a message loop. Returning before
+     * the callback is installed is deliberate: the app's Zig handler
+     * never runs in this process, so no half-started runtime observes a
+     * lifecycle it will not finish. The exit code stays success — from
+     * the user's side the link WAS opened, in the window they already
+     * had. If the forward fails (the primary died between the mutex
+     * check and the lookup) the links are lost rather than opening a
+     * rogue second window; the race is narrow and a stray extra window
+     * is the worse failure for a single-instance app. */
+    if (host->is_secondary) {
+        forwardUrlsToPrimary(host->bundle_id, commandLineUrls());
+        return;
+    }
     host->callback = callback;
     host->callback_context = context;
     host->running = true;
@@ -5295,11 +5589,19 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
     /* The launching deep link goes out after START and the window
      * events, so the app handles it with its windows already reserved
      * rather than from an unstarted runtime — the ordering macOS gets
-     * from flushPendingOpenURLs. Cold launch only: without a
-     * single-instance channel a link opened while the app runs starts a
-     * SECOND process, which emits this from its own startup instead of
-     * reaching the running one. */
+     * from flushPendingOpenURLs. This is the cold-launch link; a link
+     * clicked while the app runs arrives instead over WM_COPYDATA from
+     * the secondary the shell started (see the single-instance block),
+     * and is dispatched by the loop below. */
     emitOpenedUrls(host, commandLineUrls());
+    /* A secondary that forwarded between the message window existing
+     * and this point parked its links on the host; drain them here so
+     * they land after START like every other inbound link. */
+    if (!host->pending_forwarded_urls.empty()) {
+        const std::string pending = host->pending_forwarded_urls;
+        host->pending_forwarded_urls.clear();
+        emitOpenedUrls(host, pending);
+    }
     MSG message = {};
     while (host->running && GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);
