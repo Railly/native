@@ -912,6 +912,13 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{} });
                 app_mod.linkSystemLibrary("gtk4", .{});
                 app_mod.linkSystemLibrary("webkitgtk-6.0", .{});
+                // Xlib directly, for the one thing GTK4 stopped
+                // exposing: a floating window sets _NET_WM_STATE_ABOVE
+                // through XChangeProperty, since GTK4 dropped
+                // gtk_window_set_keep_above outright. gtk4 pulls libX11
+                // in transitively at runtime but does not put it on the
+                // link line, so the symbol resolves only if we ask.
+                app_mod.linkSystemLibrary("X11", .{});
                 app_mod.linkSystemLibrary("dl", .{});
             } else {
                 // Native-only app (nothing in app.zon declares web use):
@@ -924,6 +931,10 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // executable carries no WebKit reference at all.
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
                 app_mod.linkSystemLibrary("gtk4", .{});
+                // See the web-layer branch above: the floating flag
+                // reaches the window manager through Xlib, so X11 has to
+                // be on the link line even though gtk4 loads it anyway.
+                app_mod.linkSystemLibrary("X11", .{});
                 app_mod.linkSystemLibrary("dl", .{});
             },
             .chromium => {
