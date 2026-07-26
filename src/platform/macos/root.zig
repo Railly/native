@@ -39,6 +39,7 @@ const AppKitEventKind = enum(c_int) {
     gpu_surface_scroll_driver = 18,
     context_menu_action = 19,
     audio = 20,
+    urls_opened = 21,
 };
 
 const AppKitEvent = extern struct {
@@ -114,6 +115,10 @@ const AppKitEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// Deep-link payload (`kind == .urls_opened`): the URLs packed
+    /// NUL-separated, reusing the drop-path wire shape.
+    open_urls: [*]const u8,
+    open_urls_len: usize,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -802,6 +807,11 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
                 .window_id = event.window_id,
                 .paths = paths,
             } });
+        },
+        .urls_opened => {
+            var urls_buffer: [platform_mod.max_open_urls][]const u8 = undefined;
+            const urls = platform_mod.splitDropPaths(event.open_urls[0..event.open_urls_len], urls_buffer[0..]);
+            state.emit(.{ .urls_opened = .{ .urls = urls } });
         },
         .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
             .window_id = event.window_id,

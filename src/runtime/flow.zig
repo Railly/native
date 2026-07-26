@@ -451,6 +451,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     emitFileDropEvent(self, drop) catch |err| log(self, "drop.files.emit_failed", @errorName(err), &.{trace.uint("window_id", drop.window_id)});
                     self.invalidateFor(.command, null);
                 },
+                .urls_opened => |open| {
+                    try dispatchEvent(self, app, .{ .urls_opened = open });
+                    emitUrlOpenEvent(self, open) catch |err| log(self, "url.open.emit_failed", @errorName(err), &.{});
+                    self.invalidateFor(.command, null);
+                },
                 .app_shutdown => {
                     try dispatchEvent(self, app, .{ .lifecycle = .stop });
                     if (self.options.extensions) |registry| try registry.stopAll(extensionContext(self));
@@ -499,6 +504,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .effects_wake => {},
                 .audio => {},
                 .files_dropped => {},
+                .urls_opened => {},
                 .gpu_surface_frame => {},
                 .gpu_surface_resized => {},
                 .gpu_surface_input => {},
@@ -1140,6 +1146,25 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         fn emitAppLifecycleEvent(self: *Runtime, name: []const u8) anyerror!void {
             for (self.windows[0..self.window_count]) |window| {
                 if (window.info.open) try emitWindowEvent(self, window.info.id, name, "{}");
+            }
+        }
+
+        /// Deep links address the app, not a window, so the detail
+        /// reaches every open window's bridge the way the lifecycle
+        /// events do — web content decides for itself whether the URL
+        /// concerns it.
+        fn emitUrlOpenEvent(self: *Runtime, open: platform.UrlOpenEvent) anyerror!void {
+            var buffer: [platform.max_window_event_detail_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try writer.writeAll("{\"urls\":[");
+            for (open.urls, 0..) |url, index| {
+                if (index > 0) try writer.writeByte(',');
+                try json.writeString(&writer, url);
+            }
+            try writer.writeAll("]}");
+            const detail = writer.buffered();
+            for (self.windows[0..self.window_count]) |window| {
+                if (window.info.open) try emitWindowEvent(self, window.info.id, "app:open-urls", detail);
             }
         }
 

@@ -32,6 +32,7 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER = 18,
     NATIVE_SDK_APPKIT_EVENT_CONTEXT_MENU_ACTION = 19,
     NATIVE_SDK_APPKIT_EVENT_AUDIO = 20,
+    NATIVE_SDK_APPKIT_EVENT_URLS_OPENED = 21,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -309,6 +310,11 @@ typedef struct {
      * the -60 dBFS analysis floor at 0 to full scale at 255). Zeros on
      * every other event kind. */
     uint8_t audio_bands[NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS];
+    /* URLS_OPENED payloads: the deep-link URLs packed NUL-separated,
+     * the same wire shape drop_paths uses (a URL cannot contain a raw
+     * NUL, so the separator stays unambiguous). */
+    const char *open_urls;
+    size_t open_urls_len;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);

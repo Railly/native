@@ -270,6 +270,9 @@ pub const Event = union(enum) {
     /// through `Effects.takeAudioMsg` into the app's `on_event` Msg.
     audio: platform.AudioEvent,
     files_dropped: platform.FileDropEvent,
+    /// The OS opened the app with URLs matching a declared scheme
+    /// (`url_schemes` in app.zon), on cold launch or while running.
+    urls_opened: platform.UrlOpenEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
     gpu_surface_input: GpuSurfaceInputEvent,
@@ -297,6 +300,7 @@ pub const Event = union(enum) {
             .effects_wake => "effects_wake",
             .audio => "audio",
             .files_dropped => "files_dropped",
+            .urls_opened => "urls_opened",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
             .gpu_surface_input => "gpu_surface_input",

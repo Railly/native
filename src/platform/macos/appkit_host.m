@@ -641,7 +641,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
-@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate>
+@interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate, NSApplicationDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NativeSdkWindowDelegate *delegate;
@@ -777,6 +777,12 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) BOOL didShutdown;
 @property(nonatomic, assign) BOOL observesApplicationActivation;
 @property(nonatomic, assign) BOOL observesAppearanceChanges;
+/* Deep links that arrived before the run callback existed. A cold
+ * launch through a URL scheme delivers application:openURLs: during
+ * [NSApp run]'s first pump, which can precede runWithCallback:'s
+ * callback assignment; without this the launching URL (the whole point
+ * of the launch) would be dropped. */
+@property(nonatomic, strong) NSMutableArray<NSString *> *pendingOpenURLs;
 @property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
 @property(nonatomic, strong) id shortcutEventMonitor;
 @property(nonatomic, strong) id willTerminateObserver;
@@ -858,6 +864,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)stop;
 - (void)emitEvent:(native_sdk_appkit_event_t)event;
 - (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId;
+- (BOOL)emitOpenedURLs:(NSArray<NSURL *> *)urls;
+- (void)flushPendingOpenURLs;
 - (void)startApplicationActivationObservers;
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
@@ -6437,6 +6445,14 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     NativeSdkLaunchLap("host_init");
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    // App delegate from init, not from runWithCallback:. A launch
+    // through a declared URL scheme hands the app its URLs as soon as
+    // the run loop pumps, and AppKit drops them silently if no delegate
+    // answers by then. Activation/appearance stay on notifications:
+    // the delegate exists for the callbacks that have no notification
+    // equivalent.
+    self.pendingOpenURLs = [[NSMutableArray alloc] init];
+    NSApp.delegate = self;
     NativeSdkLaunchLap("nsapp_ready");
     NativeSdkRegisterBundledFonts();
     NativeSdkLaunchLap("fonts_registered");
@@ -8372,6 +8388,10 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [self emitAppearanceChanged];
     [self emitResize];
     [self emitWindowFrame:YES];
+    // The launching deep link lands after START (and after the surface
+    // is described), so the app handles it with its windows already
+    // reserved rather than from an unstarted runtime.
+    [self flushPendingOpenURLs];
 
     // First canvas frame, synchronously: a canvas-first startup window's
     // first frame request was queued during the START dispatch above and
@@ -8480,6 +8500,58 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)applicationDidResignActive:(NSNotification *)notification {
     (void)notification;
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_APP_DEACTIVATED }];
+}
+
+/* Deep links, the modern NSApplicationDelegate entry point (the Carbon
+ * kInternetEventClass/GURL Apple event it replaced is not installed).
+ * Fires both for a cold launch through a declared scheme and for a
+ * link opened while the app already runs. */
+- (void)application:(NSApplication *)application openURLs:(NSArray<NSURL *> *)urls {
+    (void)application;
+    [self emitOpenedURLs:urls];
+}
+
+- (BOOL)emitOpenedURLs:(NSArray<NSURL *> *)urls {
+    NSMutableArray<NSString *> *values = [NSMutableArray array];
+    for (NSURL *url in urls) {
+        NSString *value = url.absoluteString;
+        if (value.length == 0) continue;
+        [values addObject:value];
+    }
+    if (values.count == 0) return NO;
+    // No callback yet: a cold launch's URL waits for runWithCallback:
+    // instead of vanishing into a nil callback.
+    if (!self.callback) {
+        [self.pendingOpenURLs addObjectsFromArray:values];
+        return NO;
+    }
+    NSMutableData *data = [NSMutableData data];
+    const char separator = '\0';
+    for (NSString *value in values) {
+        NSData *valueData = [value dataUsingEncoding:NSUTF8StringEncoding];
+        if (!valueData || valueData.length == 0) continue;
+        if (data.length > 0) [data appendBytes:&separator length:1];
+        [data appendData:valueData];
+    }
+    if (data.length == 0) return NO;
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_URLS_OPENED,
+        .open_urls = data.bytes,
+        .open_urls_len = data.length,
+    }];
+    return YES;
+}
+
+- (void)flushPendingOpenURLs {
+    if (self.pendingOpenURLs.count == 0) return;
+    NSArray<NSString *> *values = [self.pendingOpenURLs copy];
+    [self.pendingOpenURLs removeAllObjects];
+    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:values.count];
+    for (NSString *value in values) {
+        NSURL *url = [NSURL URLWithString:value];
+        if (url) [urls addObject:url];
+    }
+    [self emitOpenedURLs:urls];
 }
 
 - (void)startAppearanceObservers {

@@ -351,6 +351,46 @@ test "runtime dispatches file drop events to app and window bridge" {
     try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastWindowEventDetail(), "\"paths\":[\"/tmp/one\\nname.txt\",\"/tmp/two.txt\"]") != null);
 }
 
+test "runtime dispatches opened URLs to app and window bridge" {
+    const TestApp = struct {
+        open_count: u32 = 0,
+        last_urls: []const []const u8 = &.{},
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "url-open", .source = platform.WebViewSource.html("<p>Links</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .urls_opened => |open| {
+                    self.open_count += 1;
+                    self.last_urls = open.urls;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    const opened_urls = [_][]const u8{ "acme-notes://open?id=42", "acme-notes://new" };
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .urls_opened = .{ .urls = &opened_urls } });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.open_count);
+    try std.testing.expectEqual(@as(usize, 2), app_state.last_urls.len);
+    try std.testing.expectEqualStrings("acme-notes://open?id=42", app_state.last_urls[0]);
+    try std.testing.expectEqualStrings("acme-notes://new", app_state.last_urls[1]);
+    // The deep link addresses the app, so the detail carries no window
+    // id — only the URL list — and reaches the open window's bridge.
+    try std.testing.expectEqualStrings("app:open-urls", harness.null_platform.lastWindowEventName());
+    try std.testing.expectEqualStrings("{\"urls\":[\"acme-notes://open?id=42\",\"acme-notes://new\"]}", harness.null_platform.lastWindowEventDetail());
+}
+
 test "runtime routes file drops to retained canvas widget targets" {
     const TestApp = struct {
         drop_count: u32 = 0,

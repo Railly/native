@@ -112,6 +112,11 @@ pub const max_session_event_depth: usize = 8;
 /// Maximum dropped-file paths one journaled `files_dropped` event keeps.
 pub const max_session_drop_paths: usize = 32;
 
+/// Maximum URLs one journaled `urls_opened` event keeps. A deep link
+/// carries one URL in practice; the ceiling covers a multi-selection
+/// "Open With" that hands the app several at once.
+pub const max_session_open_urls: usize = 32;
+
 pub const JournalError = error{
     /// The file does not start with the session-journal magic — it is
     /// not a journal (or the first bytes were destroyed).
@@ -202,10 +207,13 @@ pub const Record = union(RecordKind) {
 };
 
 /// Decode scratch for payloads that need an outer slice (dropped-file
-/// path lists). Owned by the Reader; decoded events reference it until
-/// the next `next()` call.
+/// path lists, deep-link URL lists). Owned by the Reader; decoded events
+/// reference it until the next `next()` call. One slot per list-shaped
+/// payload rather than a shared buffer: two lists in flight must not
+/// alias each other's storage.
 pub const EventDecodeStorage = struct {
     drop_paths: [max_session_drop_paths][]const u8 = undefined,
+    open_urls: [max_session_open_urls][]const u8 = undefined,
 };
 
 // ------------------------------------------------------------ cursors
@@ -332,6 +340,7 @@ const EventTag = enum(u8) {
     context_menu_action = 22,
     widget_accessibility_action = 23,
     audio = 24,
+    urls_opened = 25,
 };
 
 fn writeModifiers(cursor: *WriteCursor, modifiers: platform.ShortcutModifiers) JournalError!void {
@@ -479,6 +488,12 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(audio.playing);
             try cursor.writeBool(audio.buffering);
             try cursor.writeBytes(&audio.bands);
+        },
+        .urls_opened => |open| {
+            try cursor.writeEnum(EventTag.urls_opened);
+            if (open.urls.len > max_session_open_urls) return error.JournalRecordOverBudget;
+            try cursor.writeInt(u16, @intCast(open.urls.len));
+            for (open.urls) |url| try cursor.writeStr(url);
         },
         .files_dropped => |drop| {
             try cursor.writeEnum(EventTag.files_dropped);
@@ -677,6 +692,14 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             };
             @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
             break :blk .{ .audio = decoded };
+        },
+        .urls_opened => blk: {
+            const count = try cursor.readInt(u16);
+            if (count > max_session_open_urls) return error.JournalCorrupt;
+            for (0..count) |index| {
+                storage.open_urls[index] = try cursor.readStr();
+            }
+            break :blk .{ .urls_opened = .{ .urls = storage.open_urls[0..count] } };
         },
         .files_dropped => blk: {
             const window_id = try cursor.readInt(u64);
@@ -1205,6 +1228,16 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqual(@as(usize, 2), decoded.files_dropped.paths.len);
         try testing.expectEqualStrings("/tmp/b.txt", decoded.files_dropped.paths[1]);
         try testing.expectEqual(@as(f32, 34), decoded.files_dropped.point.?.y);
+    }
+    {
+        // Deep links replay from the journal alone: a recorded session
+        // that launched through a URL scheme must re-deliver the same
+        // URLs, query string included.
+        const urls = [_][]const u8{ "acme-notes://open?id=42", "acme-notes://new" };
+        const decoded = try roundTripEvent(.{ .urls_opened = .{ .urls = &urls } });
+        try testing.expectEqual(@as(usize, 2), decoded.urls_opened.urls.len);
+        try testing.expectEqualStrings("acme-notes://open?id=42", decoded.urls_opened.urls[0]);
+        try testing.expectEqualStrings("acme-notes://new", decoded.urls_opened.urls[1]);
     }
     {
         const decoded = try roundTripEvent(.{ .gpu_surface_frame = .{

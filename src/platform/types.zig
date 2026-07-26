@@ -220,6 +220,8 @@ pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
 pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
+pub const max_open_urls_bytes: usize = 8192;
+pub const max_open_urls: usize = max_open_urls_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
 pub const max_window_event_detail_bytes: usize = 8192;
 pub const max_views: usize = 32;
@@ -1402,6 +1404,14 @@ pub const FileDropEvent = struct {
     paths: []const []const u8 = &.{},
 };
 
+/// The OS handed the app URLs matching a scheme it declared
+/// (`url_schemes` in app.zon). Carries no window id: the deep link
+/// addresses the APP, and on a cold launch it arrives before any window
+/// the app would route it to exists.
+pub const UrlOpenEvent = struct {
+    urls: []const []const u8 = &.{},
+};
+
 pub const GpuFrame = struct {
     surface_id: ViewId = 0,
     window_id: WindowId = 1,
@@ -2034,6 +2044,9 @@ pub const Event = union(enum) {
     /// Audio player reports: load acknowledgment, coarse position ticks
     /// while playing, one completion at natural end, async failures.
     audio: AudioEvent,
+    /// A deep link: the OS launched or activated the app with URLs
+    /// matching a declared scheme.
+    urls_opened: UrlOpenEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -2061,10 +2074,15 @@ pub const Event = union(enum) {
             .context_menu_action => "context_menu_action",
             .widget_accessibility_action => "widget_accessibility_action",
             .audio => "audio",
+            .urls_opened => "urls_opened",
         };
     }
 };
 
+/// Splits the hosts' NUL-separated string payload. Named for its first
+/// caller (file drops), but the wire shape is shared: deep-link URLs
+/// arrive the same way, since neither a POSIX path nor a URL can carry
+/// a raw NUL.
 pub fn splitDropPaths(bytes: []const u8, output: [][]const u8) []const []const u8 {
     var count: usize = 0;
     var start: usize = 0;
