@@ -4376,3 +4376,108 @@ test "pinch identity distinguishes windows and views in the Msg" {
     try std.testing.expectEqual(@as(u32, 2), app_state.model.begins);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.ends);
 }
+
+// -------------------------------------------- deep link (urls_opened)
+
+const DeepLinkModel = struct {
+    opens: u32 = 0,
+    /// The last link's tail, copied out of the event: the runtime's
+    /// slice is dispatch-scoped, so the model cannot borrow it.
+    last_id: [32]u8 = @splat(0),
+    last_id_len: usize = 0,
+    urls_seen: usize = 0,
+
+    fn lastId(self: *const DeepLinkModel) []const u8 {
+        return self.last_id[0..self.last_id_len];
+    }
+};
+
+const DeepLinkMsg = union(enum) {
+    opened: struct { id: []const u8, count: usize },
+};
+
+const DeepLinkApp = ui_app_model.UiApp(DeepLinkModel, DeepLinkMsg);
+
+fn deepLinkUpdate(model: *DeepLinkModel, msg: DeepLinkMsg) void {
+    switch (msg) {
+        .opened => |open| {
+            model.opens += 1;
+            model.urls_seen = open.count;
+            const len = @min(open.id.len, model.last_id.len);
+            @memcpy(model.last_id[0..len], open.id[0..len]);
+            model.last_id_len = len;
+        },
+    }
+}
+
+fn deepLinkView(ui: *DeepLinkApp.Ui, model: *const DeepLinkModel) DeepLinkApp.Ui.Node {
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, ui.fmt("Opens {d}", .{model.opens})),
+    });
+}
+
+/// Maps the OS-delivered links into one Msg. The slice is only valid for
+/// the dispatch, so the Msg carries a borrowed view and `update` copies.
+fn deepLinkUrls(urls: []const []const u8) ?DeepLinkMsg {
+    if (urls.len == 0) return null;
+    const first = urls[0];
+    const prefix = "acme-notes://open?id=";
+    if (!std.mem.startsWith(u8, first, prefix)) return null;
+    return DeepLinkMsg{ .opened = .{ .id = first[prefix.len..], .count = urls.len } };
+}
+
+test "ui app maps opened urls into a msg through on_urls_opened" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(DeepLinkApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = DeepLinkApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-deep-link",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = deepLinkUpdate,
+        .view = deepLinkView,
+        .on_urls_opened = deepLinkUrls,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // Install first: a cold-launch link is buffered by the host until the
+    // runtime runs, so the Msg always lands on a built model.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.opens);
+
+    // The deep link carries no window id; the Msg still reaches update
+    // and the rebuild it triggers renders the new count.
+    const opened_urls = [_][]const u8{ "acme-notes://open?id=42", "acme-notes://new" };
+    try harness.runtime.dispatchPlatformEvent(app, .{ .urls_opened = .{ .urls = &opened_urls } });
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.opens);
+    try std.testing.expectEqualStrings("42", app_state.model.lastId());
+    try std.testing.expectEqual(@as(usize, 2), app_state.model.urls_seen);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Opens 1"));
+
+    // A second link updates the same model: the channel is not one-shot.
+    const reopened = [_][]const u8{"acme-notes://open?id=7"};
+    try harness.runtime.dispatchPlatformEvent(app, .{ .urls_opened = .{ .urls = &reopened } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.opens);
+    try std.testing.expectEqualStrings("7", app_state.model.lastId());
+    try std.testing.expectEqual(@as(usize, 1), app_state.model.urls_seen);
+
+    // A link the hook declines dispatches nothing (the `on_key` fallback
+    // contract): an unrecognized scheme must not disturb the model.
+    const ignored = [_][]const u8{"other://ignored"};
+    try harness.runtime.dispatchPlatformEvent(app, .{ .urls_opened = .{ .urls = &ignored } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.opens);
+    try std.testing.expectEqualStrings("7", app_state.model.lastId());
+}

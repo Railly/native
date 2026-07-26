@@ -604,6 +604,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Called after presenting every frame except the installing
             /// one.
             on_frame: ?*const fn (model: *const ModelT, frame: platform.GpuFrame) ?MsgT = null,
+            /// Optional mapping from deep links into messages: the OS
+            /// handed the app URLs matching a scheme it declared
+            /// (`url_schemes` in app.zon — without that declaration the
+            /// OS never routes the link here, and the channel simply
+            /// never fires). The app-level counterpart to a file drop:
+            /// the event carries no window id, because a deep link
+            /// addresses the APP, so the Msg dispatches against the
+            /// canvas window the way `on_command`'s window-less sources
+            /// do.
+            ///
+            /// A cold launch delivers its link AFTER startup, not
+            /// before: the host buffers the launching URLs until the
+            /// runtime is running, so the Msg lands with windows already
+            /// reserved rather than against an uninstalled model. An app
+            /// that routes on the link (open note 42) should treat it as
+            /// a state change arriving into a built model, not as
+            /// initial state — the first view builds without it.
+            ///
+            /// The slice and its URLs live only for the dispatch: copy
+            /// anything the model keeps past the returned Msg.
+            on_urls_opened: ?*const fn (urls: []const []const u8) ?MsgT = null,
             /// Reads runtime-owned widget state (slider values, scroll
             /// offsets) back into the model before update and rebuild so
             /// the next source tree does not stomp it. Main canvas only:
@@ -2787,6 +2808,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // the way — the recorded boundary).
                 .audio => |audio_event| if (self.effects.takeAudioMsg(audio_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                // A deep link addresses the app, not a window: the event
+                // carries no window id, so the Msg dispatches against
+                // the canvas window like a window-less command source.
+                .urls_opened => |open| {
+                    const map = self.options.on_urls_opened orelse return;
+                    if (map(open.urls)) |msg| {
+                        try self.dispatch(runtime, self.canvas_window_id, msg);
+                    }
                 },
                 .effects_wake => try self.drainEffects(runtime),
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
