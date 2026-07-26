@@ -358,7 +358,14 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try dir.createDirPath(io, "share/icons");
         const desktop_entry = try linuxDesktopEntry(allocator, options.metadata);
         defer allocator.free(desktop_entry);
-        const desktop_path = try std.fmt.allocPrint(allocator, "share/applications/{s}.desktop", .{options.metadata.name});
+        // The id, not the name: GNOME's application-id guidance is that
+        // the application id "serves as the base name for the .desktop
+        // file", and GApplication owns that same id on the session bus.
+        // When the two disagree, a launcher opening a URI cannot tie the
+        // desktop entry to the running instance, so it cold-starts a
+        // second process instead of delivering ::open to the primary --
+        // which is exactly what a url_schemes app must not do.
+        const desktop_path = try std.fmt.allocPrint(allocator, "share/applications/{s}.desktop", .{options.metadata.id});
         defer allocator.free(desktop_path);
         try writeFile(dir, io, desktop_path, desktop_entry);
         if (options.metadata.file_associations.len > 0) {
