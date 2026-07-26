@@ -29,6 +29,7 @@ typedef enum {
     NATIVE_SDK_GTK_EVENT_TIMER = 15,
     NATIVE_SDK_GTK_EVENT_APPEARANCE = 16,
     NATIVE_SDK_GTK_EVENT_AUDIO = 17,
+    NATIVE_SDK_GTK_EVENT_URLS_OPENED = 18,
 } native_sdk_gtk_event_kind_t;
 
 typedef struct {
@@ -89,6 +90,11 @@ typedef struct {
      * 50 Hz..16 kHz buckets, each linear-in-dB from -60 dBFS at 0 to
      * full scale at 255. All zeros on every other event kind. */
     uint8_t audio_bands[32];
+    /* URLS_OPENED payloads: the deep-link URIs packed NUL-separated,
+     * the same wire shape drop_paths uses (a URI cannot contain a raw
+     * NUL, so the separator stays unambiguous). */
+    const char *open_urls;
+    size_t open_urls_len;
 } native_sdk_gtk_event_t;
 
 typedef void (*native_sdk_gtk_event_callback_t)(void *context, const native_sdk_gtk_event_t *event);

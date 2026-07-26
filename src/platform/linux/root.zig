@@ -32,6 +32,7 @@ const GtkEventKind = enum(c_int) {
     timer = 15,
     appearance = 16,
     audio = 17,
+    urls_opened = 18,
 };
 
 const GtkEvent = extern struct {
@@ -91,6 +92,10 @@ const GtkEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// Deep-link payload (`kind == .urls_opened`): the URIs packed
+    /// NUL-separated, reusing the drop-path wire shape.
+    open_urls: [*]const u8,
+    open_urls_len: usize,
 };
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
@@ -417,6 +422,7 @@ const RunState = struct {
         const context = self.handler_context orelse return;
         handler(context, event) catch {
             self.failed = true;
+            if (comptime @import("builtin").is_test) return;
             if (self.self) |linux| native_sdk_gtk_stop(linux.host);
         };
     }
@@ -478,6 +484,11 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
                 .window_id = event.window_id,
                 .paths = paths,
             } });
+        },
+        .urls_opened => {
+            var urls_buffer: [platform_mod.max_open_urls][]const u8 = undefined;
+            const urls = platform_mod.splitDropPaths(event.open_urls[0..event.open_urls_len], urls_buffer[0..]);
+            state.emit(.{ .urls_opened = .{ .urls = urls } });
         },
         .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
             .window_id = event.window_id,
@@ -1545,4 +1556,45 @@ fn viewKindInt(kind: platform_mod.ViewKind) c_int {
 
 test "linux platform module exports type" {
     _ = LinuxPlatform;
+}
+
+/// Collects what the host handed the runtime, so a host test can assert
+/// on the event that actually crossed the seam.
+const TestEventSink = struct {
+    urls: [platform_mod.max_open_urls][]const u8 = undefined,
+    count: usize = 0,
+    events: usize = 0,
+
+    fn handle(context: *anyopaque, event: platform_mod.Event) anyerror!void {
+        const self: *TestEventSink = @ptrCast(@alignCast(context));
+        switch (event) {
+            .urls_opened => |open| {
+                self.events += 1;
+                self.count = open.urls.len;
+                for (open.urls, 0..) |url, index| self.urls[index] = url;
+            },
+            else => {},
+        }
+    }
+};
+
+test "linux urls_opened event reaches the runtime handler" {
+    // The whole inbound seam in one call: the ordinal the GTK host
+    // writes from its ::open handler, the NUL-separated payload it
+    // packs, and the decode back into the UrlOpenEvent.
+    const packed_urls = "acme-notes://open?id=42\x00acme-notes://new";
+    var event = std.mem.zeroes(GtkEvent);
+    event.kind = .urls_opened;
+    event.open_urls = packed_urls.ptr;
+    event.open_urls_len = packed_urls.len;
+
+    var sink: TestEventSink = .{};
+    var state: RunState = .{ .handler = TestEventSink.handle, .handler_context = &sink };
+    gtkCallback(&state, &event);
+
+    try std.testing.expectEqual(@as(usize, 1), sink.events);
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expectEqualStrings("acme-notes://open?id=42", sink.urls[0]);
+    try std.testing.expectEqualStrings("acme-notes://new", sink.urls[1]);
+    try std.testing.expect(!state.failed);
 }

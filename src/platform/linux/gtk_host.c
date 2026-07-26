@@ -367,6 +367,10 @@ struct native_sdk_gtk_host {
     /* App timers (runtime `startTimer`) on the GLib main loop. */
     native_sdk_gtk_app_timer_t timers[NATIVE_SDK_MAX_TIMERS];
     int did_shutdown;
+    /* Startup ran (window built, START emitted). Guards the one-time
+     * work against ::open, which substitutes for ::activate on a
+     * deep-link launch and fires again for every later link. */
+    int did_startup;
     int app_active;
     guint frame_timer;
 
@@ -2938,6 +2942,14 @@ static void on_activate(GtkApplication *app, gpointer data) {
     (void)app;
     native_sdk_gtk_host_t *host = data;
 
+    /* A deep-link launch raises ::open, never ::activate, and a second
+     * link raises ::open again on the already-running instance. Startup
+     * runs once either way: ::open calls this first so the runtime is
+     * up before the URLs go out, and re-entry must not build a second
+     * @w1 nor re-emit START. */
+    if (host->did_startup) return;
+    host->did_startup = 1;
+
     native_sdk_gtk_window_t *win = native_sdk_create_window_internal(
         host, 1, host->window_title, host->window_label,
         host->init_x, host->init_y,
@@ -2957,6 +2969,51 @@ static void on_activate(GtkApplication *app, gpointer data) {
     native_sdk_emit_window_frame(host, win, 1);
 
     host->frame_timer = g_timeout_add(16, native_sdk_frame_tick, host);
+}
+
+/* Deep links. GApplication turns the non-flag commandline of a launch
+ * into this signal when G_APPLICATION_HANDLES_OPEN is set, which is how
+ * a `MimeType=x-scheme-handler/<scheme>` desktop entry delivers its URI:
+ * the launcher runs `Exec=... %U` with the link as an argument, and
+ * GApplication routes it here — on the PRIMARY instance, so a link
+ * opened while the app runs arrives in the running process rather than
+ * starting a second one. */
+static void on_open(GApplication *app, GFile **files, gint n_files, const gchar *hint, gpointer data) {
+    (void)app;
+    (void)hint;
+    native_sdk_gtk_host_t *host = data;
+    if (!host || !files || n_files <= 0) return;
+
+    /* ::open replaces ::activate on a cold launch, so the window and the
+     * START event have to come from here before the URLs are emitted:
+     * the app handles its launching link with windows already reserved,
+     * the same ordering macOS gets from flushPendingOpenURLs. */
+    on_activate(host->app, host);
+
+    GString *urls = g_string_new(NULL);
+    if (!urls) return;
+    for (gint index = 0; index < n_files; index++) {
+        if (!files[index]) continue;
+        /* g_file_get_uri, not g_file_get_path: a custom scheme has no
+         * filesystem path, and the URI is the payload the app asked
+         * for. GFile round-trips an unrecognized scheme verbatim. */
+        char *uri = g_file_get_uri(files[index]);
+        if (!uri || uri[0] == '\0') {
+            g_free(uri);
+            continue;
+        }
+        if (urls->len > 0) g_string_append_c(urls, '\0');
+        g_string_append(urls, uri);
+        g_free(uri);
+    }
+    if (urls->len > 0) {
+        native_sdk_emit(host, (native_sdk_gtk_event_t){
+            .kind = NATIVE_SDK_GTK_EVENT_URLS_OPENED,
+            .open_urls = urls->str,
+            .open_urls_len = urls->len,
+        });
+    }
+    g_string_free(urls, TRUE);
 }
 
 native_sdk_gtk_host_t *native_sdk_gtk_create(
@@ -2993,7 +3050,10 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     host->allowed_external_urls = NULL;
     host->allowed_external_urls_count = 0;
 
-    host->app = gtk_application_new(host->bundle_id, G_APPLICATION_DEFAULT_FLAGS);
+    /* HANDLES_OPEN so a declared url_scheme reaches ::open. Without it
+     * GApplication treats the launcher's URI argument as an error and
+     * the deep link dies in the local instance. */
+    host->app = gtk_application_new(host->bundle_id, G_APPLICATION_HANDLES_OPEN);
 
     return host;
 }
@@ -3025,11 +3085,54 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
     free(host);
 }
 
+/* The engine's main() belongs to Zig and never forwarded argv, but
+ * GApplication needs it: with HANDLES_OPEN the non-flag arguments ARE
+ * the URIs to open, so passing NULL means a deep link is parsed out of
+ * existence before ::open could fire. /proc/self/cmdline is the same
+ * NUL-separated argv the kernel holds, so the host recovers it in
+ * process rather than threading argv through the whole runtime.
+ * Returns a NULL-terminated vector to free with g_strfreev; *out_argc
+ * is left at 0 when the read fails, which g_application_run reads as
+ * "no commandline" — the pre-existing behaviour. */
+static char **native_sdk_read_proc_argv(int *out_argc) {
+    *out_argc = 0;
+    char *contents = NULL;
+    gsize length = 0;
+    if (!g_file_get_contents("/proc/self/cmdline", &contents, &length, NULL)) return NULL;
+    if (length == 0) {
+        g_free(contents);
+        return NULL;
+    }
+
+    GPtrArray *argv = g_ptr_array_new();
+    gsize start = 0;
+    while (start < length) {
+        gsize end = start;
+        while (end < length && contents[end] != '\0') end++;
+        /* The final entry may be unterminated; take it either way. */
+        if (end > start) g_ptr_array_add(argv, g_strndup(contents + start, end - start));
+        start = end + 1;
+    }
+    g_free(contents);
+
+    if (argv->len == 0) {
+        g_ptr_array_free(argv, TRUE);
+        return NULL;
+    }
+    *out_argc = (int)argv->len;
+    g_ptr_array_add(argv, NULL);
+    return (char **)g_ptr_array_free(argv, FALSE);
+}
+
 void native_sdk_gtk_run(native_sdk_gtk_host_t *host, native_sdk_gtk_event_callback_t callback, void *context) {
     host->callback = callback;
     host->callback_context = context;
     g_signal_connect(host->app, "activate", G_CALLBACK(on_activate), host);
-    g_application_run(G_APPLICATION(host->app), 0, NULL);
+    g_signal_connect(host->app, "open", G_CALLBACK(on_open), host);
+    int argc = 0;
+    char **argv = native_sdk_read_proc_argv(&argc);
+    g_application_run(G_APPLICATION(host->app), argc, argv);
+    if (argv) g_strfreev(argv);
 }
 
 void native_sdk_gtk_stop(native_sdk_gtk_host_t *host) {

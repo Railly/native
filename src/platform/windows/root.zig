@@ -33,6 +33,7 @@ const WindowsEventKind = enum(c_int) {
     timer = 16,
     appearance = 17,
     audio = 18,
+    urls_opened = 19,
 };
 
 const WindowsEvent = extern struct {
@@ -97,6 +98,10 @@ const WindowsEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// Deep-link payload (`kind == .urls_opened`): the URLs packed
+    /// NUL-separated, reusing the drop-path wire shape.
+    open_urls: [*]const u8,
+    open_urls_len: usize,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -409,6 +414,10 @@ const RunState = struct {
         const context = self.handler_context orelse return;
         handler(context, event) catch {
             self.failed = true;
+            // Hermetic builds (host tests on another OS) never link the
+            // Win32 host, so the stop extern stays out of the binary;
+            // the failed flag is the whole observable effect there.
+            if (comptime @import("builtin").is_test) return;
             if (self.self) |windows| native_sdk_windows_stop(windows.host);
         };
     }
@@ -429,6 +438,11 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
                 .window_id = event.window_id,
                 .paths = paths,
             } });
+        },
+        .urls_opened => {
+            var urls_buffer: [platform_mod.max_open_urls][]const u8 = undefined;
+            const urls = platform_mod.splitDropPaths(event.open_urls[0..event.open_urls_len], urls_buffer[0..]);
+            state.emit(.{ .urls_opened = .{ .urls = urls } });
         },
         .resize => {
             const surface: platform_mod.Surface = .{
@@ -1477,6 +1491,47 @@ test "windows audio event maps kinds and payload" {
     // Unknown ordinals degrade loudly to failed, never to silence.
     try std.testing.expectEqual(platform_mod.AudioEventKind.failed, audioEventKindFromInt(3));
     try std.testing.expectEqual(platform_mod.AudioEventKind.failed, audioEventKindFromInt(99));
+}
+
+/// Collects what the host handed the runtime, so a host test can assert
+/// on the event that actually crossed the seam.
+const TestEventSink = struct {
+    urls: [platform_mod.max_open_urls][]const u8 = undefined,
+    count: usize = 0,
+    events: usize = 0,
+
+    fn handle(context: *anyopaque, event: platform_mod.Event) anyerror!void {
+        const self: *TestEventSink = @ptrCast(@alignCast(context));
+        switch (event) {
+            .urls_opened => |open| {
+                self.events += 1;
+                self.count = open.urls.len;
+                for (open.urls, 0..) |url, index| self.urls[index] = url;
+            },
+            else => {},
+        }
+    }
+};
+
+test "windows urls_opened event reaches the runtime handler" {
+    // The whole inbound seam in one call: the ordinal the Win32 host
+    // writes after parsing the launch commandline, the NUL-separated
+    // payload it packs, and the decode back into the UrlOpenEvent.
+    const packed_urls = "acme-notes://open?id=42\x00acme-notes://new";
+    var event = std.mem.zeroes(WindowsEvent);
+    event.kind = .urls_opened;
+    event.open_urls = packed_urls.ptr;
+    event.open_urls_len = packed_urls.len;
+
+    var sink: TestEventSink = .{};
+    var state: RunState = .{ .handler = TestEventSink.handle, .handler_context = &sink };
+    windowsCallback(&state, &event);
+
+    try std.testing.expectEqual(@as(usize, 1), sink.events);
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expectEqualStrings("acme-notes://open?id=42", sink.urls[0]);
+    try std.testing.expectEqualStrings("acme-notes://new", sink.urls[1]);
+    try std.testing.expect(!state.failed);
 }
 
 fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) WindowsPlatform {

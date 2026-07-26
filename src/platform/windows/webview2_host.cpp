@@ -121,6 +121,7 @@ enum EventKind {
     kTimer = 16,
     kAppearance = 17,
     kAudio = 18,
+    kUrlsOpened = 19,
 };
 
 constexpr uint32_t kShortcutModifierPrimary = 1u << 0;
@@ -233,6 +234,11 @@ struct WindowsEvent {
      * from -60 dBFS at 0 to full scale at 255). Zeros on every other
      * event kind — every emit site value-initializes the struct. */
     uint8_t audio_bands[32];
+    /* kUrlsOpened payloads: the deep-link URLs packed NUL-separated,
+     * the same wire shape drop_paths uses (a URL cannot contain a raw
+     * NUL, so the separator stays unambiguous). */
+    const char *open_urls;
+    size_t open_urls_len;
 };
 
 struct WindowsOpenDialogOpts {
@@ -1169,6 +1175,60 @@ static void emit(Host *host, const Window &window, EventKind kind) {
     event.title = window.title.c_str();
     event.title_len = window.title.size();
     host->callback(host->callback_context, &event);
+}
+
+static void emitOpenedUrls(Host *host, const std::string &urls) {
+    if (!host || !host->callback || urls.empty()) return;
+    WindowsEvent event = {};
+    event.kind = kUrlsOpened;
+    /* No window_id: a deep link addresses the app, and on a cold launch
+     * it is known before any window exists to route it to. */
+    event.open_urls = urls.c_str();
+    event.open_urls_len = urls.size();
+    host->callback(host->callback_context, &event);
+}
+
+/* Windows has no open-URL delegate: a registered scheme launches the
+ * executable with the URL as an argument (the `shell\open\command`
+ * value package.zig writes is `"<exe>" "%1"`), so the deep link IS the
+ * commandline. GetCommandLineW rather than a main() argv because the
+ * engine's main belongs to Zig and never forwarded it.
+ *
+ * Only arguments that look like a URI are taken. An app also receives
+ * file paths here through its file associations, and those already have
+ * their own inbound event; a bare path must not be mistaken for a link.
+ * The scheme test is the RFC 3986 shape (ALPHA *( ALPHA / DIGIT / "+" /
+ * "-" / "." ) ":"), with single-letter schemes rejected so `C:\dir`
+ * stays a path. */
+static bool isUriSchemeAlpha(char ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+}
+
+static bool looksLikeUri(const std::string &value) {
+    const size_t colon = value.find(':');
+    if (colon == std::string::npos || colon < 2) return false;
+    if (!isUriSchemeAlpha(value[0])) return false;
+    for (size_t index = 1; index < colon; ++index) {
+        const char ch = value[index];
+        if (!isUriSchemeAlpha(ch) && !(ch >= '0' && ch <= '9') && ch != '+' && ch != '-' && ch != '.') return false;
+    }
+    return true;
+}
+
+static std::string commandLineUrls() {
+    int count = 0;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!argv) return std::string();
+    std::string urls;
+    /* Skip argv[0] (the executable path), which is never a link. */
+    for (int index = 1; index < count; ++index) {
+        std::string value = narrow(std::wstring(argv[index]));
+        if (value.empty() || !looksLikeUri(value)) continue;
+        if (!urls.empty()) urls.push_back('\0');
+        urls.append(value);
+    }
+    LocalFree(argv);
+    return urls;
 }
 
 static void emitFileDrop(Host *host, const Window &window, const std::string &paths) {
@@ -5232,6 +5292,14 @@ void native_sdk_windows_run(Host *host, EventCallback callback, void *context) {
         emit(host, entry.second, kResize);
         emit(host, entry.second, kWindowFrame);
     }
+    /* The launching deep link goes out after START and the window
+     * events, so the app handles it with its windows already reserved
+     * rather than from an unstarted runtime — the ordering macOS gets
+     * from flushPendingOpenURLs. Cold launch only: without a
+     * single-instance channel a link opened while the app runs starts a
+     * SECOND process, which emits this from its own startup instead of
+     * reaching the running one. */
+    emitOpenedUrls(host, commandLineUrls());
     MSG message = {};
     while (host->running && GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);

@@ -99,6 +99,15 @@ const CapabilitiesApp = struct {
                 const status = try std.fmt.bufPrint(&status_buffer, "Received file drop {d}: {d} file(s): {s}", .{ self.drop_count, drop.paths.len, first_path });
                 _ = try runtime.updateView(drop.window_id, "status-label", .{ .text = status });
             },
+            // The manifest declares the scheme; this is the other half,
+            // the app hearing a link opened against it. Window 1 because
+            // a deep link addresses the app, not a window.
+            .urls_opened => |open| {
+                var status_buffer: [160]u8 = undefined;
+                const first_url = if (open.urls.len > 0) open.urls[0] else "";
+                const status = try std.fmt.bufPrint(&status_buffer, "Opened {d} URL(s): {s}", .{ open.urls.len, first_url });
+                _ = try runtime.updateView(1, "status-label", .{ .text = status });
+            },
             .lifecycle => |lifecycle| switch (lifecycle) {
                 .activate => {
                     self.activation_count += 1;
