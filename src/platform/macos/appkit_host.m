@@ -292,6 +292,21 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 }
 @end
 
+/// Floating desktop companions need panel semantics on macOS. A regular
+/// NSWindow can join the full-screen Space but remains ordered behind the
+/// full-screen application's content.
+@interface NativeSdkCompanionPanel : NSPanel
+@end
+
+@implementation NativeSdkCompanionPanel
+- (BOOL)canBecomeKeyWindow {
+    return YES;
+}
+- (BOOL)canBecomeMainWindow {
+    return YES;
+}
+@end
+
 @interface NativeSdkWindowDelegate : NSObject <NSWindowDelegate>
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
@@ -6444,7 +6459,13 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
 
     NativeSdkLaunchLap("host_init");
     [NSApplication sharedApplication];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    // A regular foreground application is excluded from another
+    // application's full-screen Space. Companion apps instead run as
+    // accessory applications; their ordinary settings windows can still
+    // activate normally when explicitly opened.
+    [NSApp setActivationPolicy:(windowFlags & 1)
+        ? NSApplicationActivationPolicyAccessory
+        : NSApplicationActivationPolicyRegular];
     // App delegate from init, not from runWithCallback:. A launch
     // through a declared URL scheme hands the app its URLs as soon as
     // the run loop pumps, and AppKit drops them silently if no delegate
@@ -6536,15 +6557,27 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
             styleMask |= NSWindowStyleMaskResizable;
         }
     }
-    NSWindow *window = titlebarStyle == 3
-        ? [[NativeSdkChromelessWindow alloc] initWithContentRect:rect
-                                                       styleMask:styleMask
-                                                         backing:NSBackingStoreBuffered
-                                                           defer:NO]
-        : [[NSWindow alloc] initWithContentRect:rect
-                                      styleMask:styleMask
-                                        backing:NSBackingStoreBuffered
-                                          defer:NO];
+    const BOOL floating = (windowFlags & 1) != 0;
+    if (floating) {
+        styleMask |= NSWindowStyleMaskNonactivatingPanel;
+    }
+    NSWindow *window;
+    if (floating) {
+        window = [[NativeSdkCompanionPanel alloc] initWithContentRect:rect
+                                                            styleMask:styleMask
+                                                              backing:NSBackingStoreBuffered
+                                                                defer:NO];
+    } else if (titlebarStyle == 3) {
+        window = [[NativeSdkChromelessWindow alloc] initWithContentRect:rect
+                                                               styleMask:styleMask
+                                                                 backing:NSBackingStoreBuffered
+                                                                   defer:NO];
+    } else {
+        window = [[NSWindow alloc] initWithContentRect:rect
+                                             styleMask:styleMask
+                                               backing:NSBackingStoreBuffered
+                                                 defer:NO];
+    }
     // The host's `windows` dictionary owns the window's lifetime under
     // ARC. NSWindow's releasedWhenClosed defaults to YES, which sends
     // an extra ARC-invisible release on close — fatal for the
@@ -6558,8 +6591,27 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     // style. Transparency drops the window shadow too: a shadow is
     // computed from the opaque frame and paints a ghost rectangle
     // behind non-rectangular content.
-    if (windowFlags & 1) {
-        window.level = NSFloatingWindowLevel;
+    if (floating) {
+        NativeSdkCompanionPanel *panel = (NativeSdkCompanionPanel *)window;
+        panel.floatingPanel = YES;
+        panel.hidesOnDeactivate = NO;
+        panel.becomesKeyOnlyIfNeeded = YES;
+        window.level = NSScreenSaverWindowLevel;
+        // A desktop companion is expected to stay beside the user's
+        // workflow when they move between Spaces or enter a full-screen
+        // app. `NSFloatingWindowLevel` only raises a window inside its
+        // current Space; without these collection behaviors independently
+        // created companion windows (for example a pet plus its activity
+        // bubble) can be split across Spaces.
+        window.collectionBehavior |= NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                     NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                     NSWindowCollectionBehaviorStationary;
+        if (@available(macOS 13.0, *)) {
+            // Unlike FullScreenAuxiliary, this explicitly lets a floating
+            // overlay join another application's full-screen set. Apple
+            // recommends it for floating windows and system overlays.
+            window.collectionBehavior |= NSWindowCollectionBehaviorCanJoinAllApplications;
+        }
     }
     if (windowFlags & 2) {
         window.opaque = NO;
@@ -6640,8 +6692,12 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         self.delegate = delegate;
         self.windowLabel = label.length > 0 ? label : @"main";
     } else if (showPolicy != 1) {
-        [window makeKeyAndOrderFront:nil];
-        [NSApp activate];
+        if (floating) {
+            [window orderFrontRegardless];
+        } else {
+            [window makeKeyAndOrderFront:nil];
+            [NSApp activate];
+        }
     }
     return YES;
 }
@@ -6660,8 +6716,12 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         const double elapsedMs = (double)(NativeSdkTimestampNanoseconds() - createdNs.unsignedLongLongValue) / 1e6;
         fprintf(stderr, "native-sdk: window %llu shown (%s) %.1f ms after create wall_ns=%llu\n", (unsigned long long)windowId, reason, elapsedMs, (unsigned long long)clock_gettime_nsec_np(CLOCK_REALTIME));
     }
-    [window makeKeyAndOrderFront:nil];
-    [NSApp activate];
+    if ([window isKindOfClass:[NativeSdkCompanionPanel class]]) {
+        [window orderFrontRegardless];
+    } else {
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activate];
+    }
     [self emitWindowFrameForWindowId:windowId open:YES];
     [self scheduleFrame];
 }
@@ -8360,9 +8420,15 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     // here and appears when its first canvas present lands (or the
     // create-time fallback deadline fires).
     if (!self.deferredShowWindows[@1]) {
-        [self.window makeKeyAndOrderFront:nil];
+        if ([self.window isKindOfClass:[NativeSdkCompanionPanel class]]) {
+            [self.window orderFrontRegardless];
+        } else {
+            [self.window makeKeyAndOrderFront:nil];
+        }
     }
-    [NSApp activate];
+    if (![self.window isKindOfClass:[NativeSdkCompanionPanel class]]) {
+        [NSApp activate];
+    }
     if (!self.shortcutEventMonitor) {
         __weak NativeSdkAppKitHost *weakSelf = self;
         self.shortcutEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
