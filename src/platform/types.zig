@@ -576,6 +576,10 @@ pub const WindowOptions = struct {
     /// The window never receives mouse events: clicks fall through to
     /// whatever is behind it.
     click_through: bool = false,
+    /// When non-zero, create this window as a compositor-managed popup
+    /// child of the named native window instead of an independent
+    /// toplevel.
+    popup_parent_id: WindowId = 0,
     show: WindowShowMode = .immediate,
     /// Content min-size floor the WINDOW enforces (macOS
     /// `contentMinSize`): the user cannot resize below it, so declared
@@ -644,6 +648,7 @@ pub const WindowCreateOptions = struct {
     /// The window never receives mouse events: clicks fall through to
     /// whatever is behind it.
     click_through: bool = false,
+    popup_parent_id: WindowId = 0,
     show: WindowShowMode = .immediate,
     /// Window-enforced content min-size floor (see
     /// `WindowOptions.min_width`/`min_height`); 0 = no floor.
@@ -664,6 +669,7 @@ pub const WindowCreateOptions = struct {
             .floating = self.floating,
             .transparent = self.transparent,
             .click_through = self.click_through,
+            .popup_parent_id = self.popup_parent_id,
             .show = self.show,
             .min_width = self.min_width,
             .min_height = self.min_height,
@@ -831,7 +837,7 @@ pub const GpuSurfaceOptions = struct {
         return (self.backend == .metal or self.backend == .software) and
             self.pixel_format == .bgra8_unorm and
             self.present_mode == .timer and
-            self.alpha_mode == .@"opaque" and
+            (self.alpha_mode == .@"opaque" or self.alpha_mode == .premultiplied) and
             self.color_space == .srgb and
             self.vsync;
     }
@@ -2117,6 +2123,7 @@ pub const PlatformServices = struct {
     create_window_fn: ?*const fn (context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo = null,
     focus_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
     close_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    update_popup_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, width: f64, height: f64, anchor_x: f64, anchor_y: f64) anyerror!void = null,
     move_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, dx: f64, dy: f64, clamp: bool) anyerror!MoveWindowResult = null,
     resize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, width: f64, height: f64, anchor: WindowResizeAnchor) anyerror!void = null,
     /// The real OS minimize verb (macOS miniaturize-to-Dock, Windows
@@ -2396,6 +2403,11 @@ pub const PlatformServices = struct {
     pub fn closeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const close_fn = self.close_window_fn orelse return error.UnsupportedService;
         return close_fn(self.context, window_id);
+    }
+
+    pub fn updatePopupWindow(self: PlatformServices, window_id: WindowId, width: f64, height: f64, anchor_x: f64, anchor_y: f64) anyerror!void {
+        const update_fn = self.update_popup_window_fn orelse return error.UnsupportedService;
+        return update_fn(self.context, window_id, width, height, anchor_x, anchor_y);
     }
 
     /// Move a window by a screen-space delta (dx right, dy DOWN, the

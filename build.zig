@@ -593,7 +593,7 @@ pub fn build(b: *std.Build) void {
         // The seam must carry the flags end to end, or every window is
         // born with 0 and the flags silently do nothing.
         .{ .path = "src/platform/linux/root.zig", .pattern = "fn windowFlagsInt(options: anytype) c_int {" },
-        .{ .path = "src/platform/linux/gtk_host.h", .pattern = "int titlebar_style, int window_flags, double min_width, double min_height);" },
+        .{ .path = "src/platform/linux/gtk_host.h", .pattern = "int titlebar_style, int window_flags, double min_width, double min_height, uint64_t popup_parent_id);" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-audio-buffering-clears-on-noop-resume", "Verify the Linux audio buffering flag drops when the 100% resume completes synchronously", &.{
         // The buffering flag normally drops at the PLAYING

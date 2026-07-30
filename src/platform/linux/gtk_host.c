@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
 /* NATIVE_SDK_ALLOW_WEBKITGTK_STUB is the build graph's declaration that
  * this app uses no web layer, and it wins over header visibility: on a
@@ -141,6 +142,27 @@ typedef struct native_sdk_gtk_menu_action {
     struct native_sdk_gtk_host *host;
 } native_sdk_gtk_menu_action_t;
 
+#define NATIVE_SDK_MAX_TRAY_ITEMS 32
+
+typedef struct native_sdk_gtk_tray_item {
+    uint32_t id;
+    char *label;
+    int separator;
+    int enabled;
+} native_sdk_gtk_tray_item_t;
+
+typedef struct native_sdk_gtk_tray {
+    GDBusConnection *bus;
+    guint item_registration_id;
+    guint menu_registration_id;
+    guint revision;
+    char *bus_name;
+    char *icon_path;
+    char *tooltip;
+    native_sdk_gtk_tray_item_t items[NATIVE_SDK_MAX_TRAY_ITEMS];
+    size_t item_count;
+} native_sdk_gtk_tray_t;
+
 /* One rectangle of the runtime-pushed window-drag mirror (markup
  * `window-drag="true"`), in the owning gpu_surface view's logical
  * coordinates. Exclusions are the press-claiming widgets INSIDE a drag
@@ -231,6 +253,7 @@ typedef struct native_sdk_gtk_native_view {
     native_sdk_gtk_drag_region_t *drag_regions;
     size_t drag_region_count;
     int gpu_drag_claimed_press;
+    int gpu_native_drag_active;
 } native_sdk_gtk_native_view_t;
 
 typedef struct native_sdk_gtk_app_timer {
@@ -294,6 +317,10 @@ typedef struct native_sdk_gtk_audio {
 typedef struct native_sdk_gtk_window {
     uint64_t id;
     GtkWindow *gtk_window;
+    /* A compositor-managed child surface for .popup_parent_id windows.
+     * Exactly one of gtk_window/popup is non-NULL. */
+    GtkWidget *popup;
+    uint64_t popup_parent_id;
     WebKitWebView *web_view;
     GtkWidget *root_box;
     GtkWidget *menu_bar;
@@ -385,6 +412,8 @@ struct native_sdk_gtk_host {
     GMenuModel *menu_model;
     native_sdk_gtk_menu_action_t menu_actions[NATIVE_SDK_MAX_MENU_ITEMS];
     int menu_action_count;
+    GtkWidget *context_popover;
+    native_sdk_gtk_tray_t tray;
     native_sdk_gtk_audio_t audio;
 };
 
@@ -789,6 +818,16 @@ static uint32_t native_sdk_gpu_modifier_flags(GdkModifierType state) {
     return flags;
 }
 
+/* Normalize GDK's physical numbering (left=1, middle=2, right=3) to
+ * the cross-platform canvas contract (primary=0, secondary=1, middle=2).
+ * A raw `button - 1` swaps secondary and middle on Linux. */
+static int native_sdk_gpu_pointer_button(guint button) {
+    if (button == GDK_BUTTON_PRIMARY) return 0;
+    if (button == GDK_BUTTON_SECONDARY) return 1;
+    if (button == GDK_BUTTON_MIDDLE) return 2;
+    return button > 0 ? (int)button - 1 : 0;
+}
+
 static void native_sdk_emit_gpu_surface_input(native_sdk_gtk_native_view_t *view, int input_kind, double x, double y, int button, double delta_x, double delta_y, const char *key, const char *text, uint32_t modifiers) {
     if (!view || !view->window || !view->window->host || !view->label) return;
     native_sdk_emit(view->window->host, (native_sdk_gtk_event_t){
@@ -808,6 +847,23 @@ static void native_sdk_emit_gpu_surface_input(native_sdk_gtk_native_view_t *view
         .input_text = text ? text : "",
         .input_text_len = text ? strlen(text) : 0,
         .shortcut_modifiers = modifiers,
+    });
+}
+
+/* Window dragging is compositor-owned on Wayland, so the canvas does not
+ * receive pointer motion while gdk_toplevel_begin_move is active. Surface
+ * the lifecycle through the ordinary app command channel: apps can animate
+ * the gesture without attempting to reposition the toplevel themselves. */
+static void native_sdk_emit_window_drag_command(native_sdk_gtk_native_view_t *view, int started) {
+    if (!view || !view->window || !view->window->host || !view->label) return;
+    const char *command = started ? "native-sdk.window-drag.begin" : "native-sdk.window-drag.end";
+    native_sdk_emit(view->window->host, (native_sdk_gtk_event_t){
+        .kind = NATIVE_SDK_GTK_EVENT_NATIVE_COMMAND,
+        .window_id = view->window->id,
+        .view_label = view->label,
+        .view_label_len = strlen(view->label),
+        .command_name = command,
+        .command_name_len = strlen(command),
     });
 }
 
@@ -1199,7 +1255,8 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
     gtk_widget_grab_focus(view->widget);
     view->gpu_pointer_x = x;
     view->gpu_pointer_y = y;
-    const int button = (int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)) - 1;
+    const guint gdk_button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+    const int button = native_sdk_gpu_pointer_button(gdk_button);
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)));
     /* Stash the press for the widget `window_drag` channel: an
      * interactive window move must begin from the originating device,
@@ -1214,7 +1271,7 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
         }
         view->window->last_press_device = event ? gdk_event_get_device(event) : NULL;
         view->window->last_press_time = event ? gdk_event_get_time(event) : GDK_CURRENT_TIME;
-        view->window->last_press_button = button < 0 ? 0 : button + 1;
+        view->window->last_press_button = gdk_button > 0 ? (int)gdk_button : 1;
         view->window->last_press_x = window_point.x;
         view->window->last_press_y = window_point.y;
     }
@@ -1232,6 +1289,8 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
             native_sdk_window_apply_titlebar_double_click(view->window);
         } else {
             native_sdk_window_begin_interactive_move(view->window);
+            view->gpu_native_drag_active = 1;
+            native_sdk_emit_window_drag_command(view, 1);
         }
         return;
     }
@@ -1250,9 +1309,14 @@ static void native_sdk_gpu_pointer_released(GtkGestureClick *gesture, int n_pres
      * never saw the down, so it must not see an orphaned up either. */
     if (view->gpu_drag_claimed_press) {
         view->gpu_drag_claimed_press = 0;
+        if (view->gpu_native_drag_active) {
+            view->gpu_native_drag_active = 0;
+            native_sdk_emit_window_drag_command(view, 0);
+        }
         return;
     }
-    const int button = (int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)) - 1;
+    const int button = native_sdk_gpu_pointer_button(
+        gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)));
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)));
     native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_POINTER_UP, x, y, button < 0 ? 0 : button, 0, 0, "", "", modifiers);
 }
@@ -1645,11 +1709,29 @@ static void native_sdk_clear_webviews(native_sdk_gtk_window_t *win) {
     }
 }
 
+static void native_sdk_popup_finalized(gpointer data, GObject *where_the_object_was) {
+    (void)where_the_object_was;
+    native_sdk_gtk_window_t *win = data;
+    if (!win) return;
+    win->popup = NULL;
+    win->root_box = NULL;
+    win->stack_root = NULL;
+    for (int i = 0; i < NATIVE_SDK_MAX_NATIVE_VIEWS; i++) {
+        win->native_views[i].widget = NULL;
+    }
+}
+
 static void native_sdk_clear_window(native_sdk_gtk_window_t *win) {
     if (!win) return;
     native_sdk_clear_native_views(win);
     native_sdk_clear_webviews(win);
     native_sdk_clear_window_source(win);
+    if (win->popup) {
+        g_object_weak_unref(G_OBJECT(win->popup), native_sdk_popup_finalized, win);
+        gtk_popover_popdown(GTK_POPOVER(win->popup));
+        gtk_widget_unparent(win->popup);
+        win->popup = NULL;
+    }
     free(win->label);
     free(win->title);
     memset(win, 0, sizeof(*win));
@@ -1968,7 +2050,8 @@ static void native_sdk_asset_scheme_request(WebKitURISchemeRequest *request, gpo
 
 static native_sdk_gtk_window_t *native_sdk_find_window(native_sdk_gtk_host_t *host, uint64_t id) {
     for (int i = 0; i < host->window_count; i++) {
-        if (host->windows[i].id == id && host->windows[i].gtk_window) return &host->windows[i];
+        if (host->windows[i].id == id &&
+            (host->windows[i].gtk_window || host->windows[i].popup)) return &host->windows[i];
     }
     return NULL;
 }
@@ -1983,6 +2066,68 @@ static native_sdk_gtk_webview_t *native_sdk_find_webview(native_sdk_gtk_window_t
 
 static void native_sdk_emit(native_sdk_gtk_host_t *host, native_sdk_gtk_event_t event) {
     if (host->callback) host->callback(host->callback_context, &event);
+}
+
+typedef struct {
+    native_sdk_gtk_host_t *host;
+    GtkWidget *popover;
+    uint64_t window_id;
+    uint64_t token;
+    char *view_label;
+    uint32_t selected_item_id;
+    int emitted;
+} native_sdk_gtk_context_menu_session_t;
+
+typedef struct {
+    native_sdk_gtk_context_menu_session_t *session;
+    uint32_t item_id;
+} native_sdk_gtk_context_menu_button_t;
+
+static void native_sdk_context_menu_emit(native_sdk_gtk_context_menu_session_t *session, uint32_t item_id) {
+    if (!session || session->emitted || !session->host) return;
+    session->emitted = 1;
+    session->selected_item_id = item_id;
+    native_sdk_emit(session->host, (native_sdk_gtk_event_t){
+        .kind = NATIVE_SDK_GTK_EVENT_CONTEXT_MENU_ACTION,
+        .window_id = session->window_id,
+        .view_label = session->view_label ? session->view_label : "",
+        .view_label_len = session->view_label ? strlen(session->view_label) : 0,
+        .widget_id = session->token,
+        .menu_item_id = item_id,
+    });
+}
+
+static void native_sdk_context_menu_button_destroy(gpointer data, GClosure *closure) {
+    (void)closure;
+    free(data);
+}
+
+static void native_sdk_context_menu_button_clicked(GtkButton *button, gpointer data) {
+    (void)button;
+    native_sdk_gtk_context_menu_button_t *action = data;
+    if (!action || !action->session) return;
+    native_sdk_context_menu_emit(action->session, action->item_id);
+    gtk_popover_popdown(GTK_POPOVER(action->session->popover));
+}
+
+static void native_sdk_context_menu_session_destroy(gpointer data) {
+    native_sdk_gtk_context_menu_session_t *session = data;
+    if (!session) return;
+    free(session->view_label);
+    free(session);
+}
+
+static void native_sdk_context_menu_closed(GtkPopover *popover, gpointer data) {
+    native_sdk_gtk_context_menu_session_t *session = data;
+    native_sdk_context_menu_emit(session, 0);
+    if (session && session->host && session->host->context_popover == GTK_WIDGET(popover)) {
+        session->host->context_popover = NULL;
+    }
+    g_object_ref(popover);
+    if (gtk_widget_get_parent(GTK_WIDGET(popover))) {
+        gtk_widget_unparent(GTK_WIDGET(popover));
+    }
+    g_object_unref(popover);
 }
 
 static void native_sdk_append_file_path(GString *paths, GFile *file) {
@@ -2064,6 +2209,245 @@ static uint64_t native_sdk_active_window_id(native_sdk_gtk_host_t *host) {
     return 1;
 }
 
+static const char native_sdk_sni_xml[] =
+    "<node>"
+    " <interface name='org.kde.StatusNotifierItem'>"
+    "  <method name='Activate'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>"
+    "  <method name='SecondaryActivate'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>"
+    "  <method name='ContextMenu'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>"
+    "  <method name='Scroll'><arg type='i' direction='in'/><arg type='s' direction='in'/></method>"
+    "  <property name='Category' type='s' access='read'/>"
+    "  <property name='Id' type='s' access='read'/>"
+    "  <property name='Title' type='s' access='read'/>"
+    "  <property name='Status' type='s' access='read'/>"
+    "  <property name='WindowId' type='u' access='read'/>"
+    "  <property name='IconName' type='s' access='read'/>"
+    "  <property name='IconThemePath' type='s' access='read'/>"
+    "  <property name='IconPixmap' type='a(iiay)' access='read'/>"
+    "  <property name='AttentionIconName' type='s' access='read'/>"
+    "  <property name='AttentionIconPixmap' type='a(iiay)' access='read'/>"
+    "  <property name='ToolTip' type='(sa(iiay)ss)' access='read'/>"
+    "  <property name='ItemIsMenu' type='b' access='read'/>"
+    "  <property name='Menu' type='o' access='read'/>"
+    "  <signal name='NewIcon'/>"
+    "  <signal name='NewToolTip'/>"
+    "  <signal name='NewStatus'><arg type='s'/></signal>"
+    " </interface>"
+    "</node>";
+
+static const char native_sdk_dbusmenu_xml[] =
+    "<node>"
+    " <interface name='com.canonical.dbusmenu'>"
+    "  <method name='GetLayout'>"
+    "   <arg name='parentId' type='i' direction='in'/><arg name='recursionDepth' type='i' direction='in'/>"
+    "   <arg name='propertyNames' type='as' direction='in'/><arg name='revision' type='u' direction='out'/>"
+    "   <arg name='layout' type='(ia{sv}av)' direction='out'/>"
+    "  </method>"
+    "  <method name='GetGroupProperties'><arg type='ai' direction='in'/><arg type='as' direction='in'/><arg type='a(ia{sv})' direction='out'/></method>"
+    "  <method name='Event'><arg type='i' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='in'/><arg type='u' direction='in'/></method>"
+    "  <method name='EventGroup'><arg type='a(isvu)' direction='in'/><arg type='ai' direction='out'/></method>"
+    "  <method name='AboutToShow'><arg type='i' direction='in'/><arg type='b' direction='out'/></method>"
+    "  <property name='Version' type='u' access='read'/>"
+    "  <property name='TextDirection' type='s' access='read'/>"
+    "  <property name='Status' type='s' access='read'/>"
+    "  <property name='IconThemePath' type='as' access='read'/>"
+    "  <signal name='LayoutUpdated'><arg type='u'/><arg type='i'/></signal>"
+    "  <signal name='ItemsPropertiesUpdated'><arg type='a(ia{sv})'/><arg type='a(ias)'/></signal>"
+    " </interface>"
+    "</node>";
+
+static GDBusNodeInfo *native_sdk_sni_info;
+static GDBusNodeInfo *native_sdk_dbusmenu_info;
+
+static void native_sdk_tray_emit_action(native_sdk_gtk_host_t *host, uint32_t id) {
+    if (!host || id == 0) return;
+    native_sdk_emit(host, (native_sdk_gtk_event_t){
+        .kind = NATIVE_SDK_GTK_EVENT_TRAY_ACTION,
+        .window_id = native_sdk_active_window_id(host),
+        .menu_item_id = id,
+    });
+}
+
+static native_sdk_gtk_tray_item_t *native_sdk_tray_find_item(native_sdk_gtk_host_t *host, uint32_t id) {
+    if (!host) return NULL;
+    for (size_t index = 0; index < host->tray.item_count; index++) {
+        if (host->tray.items[index].id == id) return &host->tray.items[index];
+    }
+    return NULL;
+}
+
+static GVariant *native_sdk_empty_pixmaps(void) {
+    GVariantBuilder builder;
+    g_variant_builder_init(&builder, G_VARIANT_TYPE("a(iiay)"));
+    return g_variant_builder_end(&builder);
+}
+
+static char *native_sdk_tray_icon_dir(native_sdk_gtk_host_t *host) {
+    if (!host || !host->tray.icon_path || !host->tray.icon_path[0]) return g_strdup("");
+    return g_path_get_dirname(host->tray.icon_path);
+}
+
+static char *native_sdk_tray_icon_name(native_sdk_gtk_host_t *host) {
+    if (!host || !host->tray.icon_path || !host->tray.icon_path[0]) return g_strdup("");
+    char *base = g_path_get_basename(host->tray.icon_path);
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = '\0';
+    return base;
+}
+
+static GVariant *native_sdk_sni_get_property(
+    GDBusConnection *connection, const gchar *sender, const gchar *object_path,
+    const gchar *interface_name, const gchar *property_name, GError **error, gpointer user_data) {
+    (void)connection; (void)sender; (void)object_path; (void)interface_name; (void)error;
+    native_sdk_gtk_host_t *host = user_data;
+    if (strcmp(property_name, "Category") == 0) return g_variant_new_string("ApplicationStatus");
+    if (strcmp(property_name, "Id") == 0) return g_variant_new_string(host->bundle_id ? host->bundle_id : "petdex");
+    if (strcmp(property_name, "Title") == 0) return g_variant_new_string(host->app_name ? host->app_name : "Petdex");
+    if (strcmp(property_name, "Status") == 0) return g_variant_new_string("Active");
+    if (strcmp(property_name, "WindowId") == 0) return g_variant_new_uint32(0);
+    if (strcmp(property_name, "IconName") == 0) {
+        char *name = native_sdk_tray_icon_name(host);
+        GVariant *value = g_variant_new_string(name);
+        g_free(name);
+        return value;
+    }
+    if (strcmp(property_name, "IconThemePath") == 0) {
+        char *dir = native_sdk_tray_icon_dir(host);
+        GVariant *value = g_variant_new_string(dir);
+        g_free(dir);
+        return value;
+    }
+    if (strcmp(property_name, "IconPixmap") == 0 || strcmp(property_name, "AttentionIconPixmap") == 0) return native_sdk_empty_pixmaps();
+    if (strcmp(property_name, "AttentionIconName") == 0) return g_variant_new_string("");
+    if (strcmp(property_name, "ToolTip") == 0) {
+        return g_variant_new("(s@a(iiay)ss)", "", native_sdk_empty_pixmaps(),
+                             host->app_name ? host->app_name : "Petdex",
+                             host->tray.tooltip ? host->tray.tooltip : "");
+    }
+    if (strcmp(property_name, "ItemIsMenu") == 0) return g_variant_new_boolean(FALSE);
+    if (strcmp(property_name, "Menu") == 0) return g_variant_new_object_path("/Menu");
+    return NULL;
+}
+
+static void native_sdk_sni_method_call(
+    GDBusConnection *connection, const gchar *sender, const gchar *object_path,
+    const gchar *interface_name, const gchar *method_name, GVariant *parameters,
+    GDBusMethodInvocation *invocation, gpointer user_data) {
+    (void)connection; (void)sender; (void)object_path; (void)interface_name; (void)parameters;
+    native_sdk_gtk_host_t *host = user_data;
+    if ((strcmp(method_name, "Activate") == 0 || strcmp(method_name, "SecondaryActivate") == 0) &&
+        host->tray.item_count > 0) {
+        for (size_t index = 0; index < host->tray.item_count; index++) {
+            if (!host->tray.items[index].separator && host->tray.items[index].enabled) {
+                native_sdk_tray_emit_action(host, host->tray.items[index].id);
+                break;
+            }
+        }
+    }
+    g_dbus_method_invocation_return_value(invocation, NULL);
+}
+
+static void native_sdk_dbusmenu_item_properties(native_sdk_gtk_tray_item_t *item, GVariantBuilder *props) {
+    if (!item) return;
+    if (item->separator) {
+        g_variant_builder_add(props, "{sv}", "type", g_variant_new_string("separator"));
+    } else {
+        g_variant_builder_add(props, "{sv}", "label", g_variant_new_string(item->label ? item->label : ""));
+        g_variant_builder_add(props, "{sv}", "enabled", g_variant_new_boolean(item->enabled));
+    }
+    g_variant_builder_add(props, "{sv}", "visible", g_variant_new_boolean(TRUE));
+}
+
+static GVariant *native_sdk_dbusmenu_layout(native_sdk_gtk_host_t *host) {
+    GVariantBuilder root_props;
+    GVariantBuilder children;
+    g_variant_builder_init(&root_props, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
+    g_variant_builder_add(&root_props, "{sv}", "children-display", g_variant_new_string("submenu"));
+    for (size_t index = 0; index < host->tray.item_count; index++) {
+        native_sdk_gtk_tray_item_t *item = &host->tray.items[index];
+        GVariantBuilder props;
+        GVariantBuilder grandchildren;
+        g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_init(&grandchildren, G_VARIANT_TYPE("av"));
+        native_sdk_dbusmenu_item_properties(item, &props);
+        GVariant *node = g_variant_new("(i@a{sv}@av)", (gint32)item->id,
+                                       g_variant_builder_end(&props),
+                                       g_variant_builder_end(&grandchildren));
+        g_variant_builder_add(&children, "v", node);
+    }
+    return g_variant_new("(i@a{sv}@av)", 0, g_variant_builder_end(&root_props), g_variant_builder_end(&children));
+}
+
+static GVariant *native_sdk_dbusmenu_get_property(
+    GDBusConnection *connection, const gchar *sender, const gchar *object_path,
+    const gchar *interface_name, const gchar *property_name, GError **error, gpointer user_data) {
+    (void)connection; (void)sender; (void)object_path; (void)interface_name; (void)error; (void)user_data;
+    if (strcmp(property_name, "Version") == 0) return g_variant_new_uint32(3);
+    if (strcmp(property_name, "TextDirection") == 0) return g_variant_new_string("ltr");
+    if (strcmp(property_name, "Status") == 0) return g_variant_new_string("normal");
+    if (strcmp(property_name, "IconThemePath") == 0) return g_variant_new_strv(NULL, 0);
+    return NULL;
+}
+
+static void native_sdk_dbusmenu_method_call(
+    GDBusConnection *connection, const gchar *sender, const gchar *object_path,
+    const gchar *interface_name, const gchar *method_name, GVariant *parameters,
+    GDBusMethodInvocation *invocation, gpointer user_data) {
+    (void)connection; (void)sender; (void)object_path; (void)interface_name;
+    native_sdk_gtk_host_t *host = user_data;
+    if (strcmp(method_name, "GetLayout") == 0) {
+        g_dbus_method_invocation_return_value(invocation,
+            g_variant_new("(u@(ia{sv}av))", host->tray.revision, native_sdk_dbusmenu_layout(host)));
+        return;
+    }
+    if (strcmp(method_name, "GetGroupProperties") == 0) {
+        GVariantBuilder result;
+        g_variant_builder_init(&result, G_VARIANT_TYPE("a(ia{sv})"));
+        for (size_t index = 0; index < host->tray.item_count; index++) {
+            native_sdk_gtk_tray_item_t *item = &host->tray.items[index];
+            GVariantBuilder props;
+            g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+            native_sdk_dbusmenu_item_properties(item, &props);
+            g_variant_builder_add(&result, "(i@a{sv})", (gint32)item->id, g_variant_builder_end(&props));
+        }
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(@a(ia{sv}))", g_variant_builder_end(&result)));
+        return;
+    }
+    if (strcmp(method_name, "Event") == 0) {
+        gint32 id = 0;
+        const gchar *event_id = NULL;
+        GVariant *data = NULL;
+        guint32 timestamp = 0;
+        g_variant_get(parameters, "(i&svu)", &id, &event_id, &data, &timestamp);
+        (void)timestamp;
+        if (data) g_variant_unref(data);
+        native_sdk_gtk_tray_item_t *item = native_sdk_tray_find_item(host, (uint32_t)id);
+        if (item && item->enabled && !item->separator && strcmp(event_id, "clicked") == 0) native_sdk_tray_emit_action(host, item->id);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+    if (strcmp(method_name, "EventGroup") == 0) {
+        GVariantBuilder errors;
+        g_variant_builder_init(&errors, G_VARIANT_TYPE("ai"));
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(@ai)", g_variant_builder_end(&errors)));
+        return;
+    }
+    if (strcmp(method_name, "AboutToShow") == 0) {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", FALSE));
+        return;
+    }
+    g_dbus_method_invocation_return_dbus_error(invocation, "com.canonical.dbusmenu.Error.UnknownMethod", method_name);
+}
+
+static const GDBusInterfaceVTable native_sdk_sni_vtable = {
+    native_sdk_sni_method_call, native_sdk_sni_get_property, NULL, { 0 }
+};
+
+static const GDBusInterfaceVTable native_sdk_dbusmenu_vtable = {
+    native_sdk_dbusmenu_method_call, native_sdk_dbusmenu_get_property, NULL, { 0 }
+};
+
 static void native_sdk_menu_action_activate(GSimpleAction *action, GVariant *parameter, gpointer data) {
     (void)action;
     (void)parameter;
@@ -2090,6 +2474,7 @@ static const char *native_sdk_accel_key_name(const char *key) {
     if (strcmp(key, "tab") == 0) return "Tab";
     if (strcmp(key, "space") == 0) return "space";
     if (strcmp(key, "backspace") == 0) return "BackSpace";
+    if (strcmp(key, ",") == 0) return "comma";
     if (strcmp(key, "arrowleft") == 0) return "Left";
     if (strcmp(key, "arrowright") == 0) return "Right";
     if (strcmp(key, "arrowup") == 0) return "Up";
@@ -2152,10 +2537,11 @@ static void native_sdk_window_content_size(native_sdk_gtk_window_t *win, int *ou
     int w = win->root_box ? gtk_widget_get_width(win->root_box) : 0;
     int h = win->root_box ? gtk_widget_get_height(win->root_box) : 0;
     if (w <= 0 || h <= 0) {
-        w = gtk_widget_get_width(GTK_WIDGET(win->gtk_window));
-        h = gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
+        GtkWidget *surface_widget = win->popup ? win->popup : GTK_WIDGET(win->gtk_window);
+        w = surface_widget ? gtk_widget_get_width(surface_widget) : 0;
+        h = surface_widget ? gtk_widget_get_height(surface_widget) : 0;
     }
-    if (w <= 0 || h <= 0) {
+    if ((w <= 0 || h <= 0) && win->gtk_window) {
         int default_w = 0, default_h = 0;
         gtk_window_get_default_size(win->gtk_window, &default_w, &default_h);
         if (w <= 0) w = default_w;
@@ -2257,12 +2643,14 @@ static void native_sdk_watch_appearance(native_sdk_gtk_host_t *host) {
 }
 
 static void native_sdk_emit_window_frame(native_sdk_gtk_host_t *host, native_sdk_gtk_window_t *win, int open) {
-    if (!win || !win->gtk_window) return;
+    if (!win || (!win->gtk_window && !win->popup)) return;
     int w = 0, h = 0;
     native_sdk_window_content_size(win, &w, &h);
-    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
+    GtkWidget *surface_widget = win->popup ? win->popup : GTK_WIDGET(win->gtk_window);
+    GtkNative *native = gtk_widget_get_native(surface_widget);
+    GdkSurface *surface = native ? gtk_native_get_surface(native) : NULL;
     double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
-    int focused = gtk_window_is_active(win->gtk_window) ? 1 : 0;
+    int focused = win->gtk_window && gtk_window_is_active(win->gtk_window) ? 1 : 0;
     native_sdk_emit(host, (native_sdk_gtk_event_t){
         .kind = NATIVE_SDK_GTK_EVENT_WINDOW_FRAME,
         .window_id = win->id,
@@ -2279,10 +2667,12 @@ static void native_sdk_emit_window_frame(native_sdk_gtk_host_t *host, native_sdk
 }
 
 static void native_sdk_emit_resize(native_sdk_gtk_host_t *host, native_sdk_gtk_window_t *win) {
-    if (!win || !win->gtk_window) return;
+    if (!win || (!win->gtk_window && !win->popup)) return;
     int w = 0, h = 0;
     native_sdk_window_content_size(win, &w, &h);
-    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
+    GtkWidget *surface_widget = win->popup ? win->popup : GTK_WIDGET(win->gtk_window);
+    GtkNative *native = gtk_widget_get_native(surface_widget);
+    GdkSurface *surface = native ? gtk_native_get_surface(native) : NULL;
     double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
     native_sdk_emit(host, (native_sdk_gtk_event_t){
         .kind = NATIVE_SDK_GTK_EVENT_RESIZE,
@@ -2400,10 +2790,12 @@ static gboolean native_sdk_frame_tick(gpointer data) {
      * depends on a non-zero surface size. */
     for (int i = 0; i < host->window_count; i++) {
         native_sdk_gtk_window_t *win = &host->windows[i];
-        if (!win->gtk_window) continue;
-        const double w = (double)gtk_widget_get_width(GTK_WIDGET(win->gtk_window));
-        const double h = (double)gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
-        GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
+        GtkWidget *surface_widget = win->popup ? win->popup : GTK_WIDGET(win->gtk_window);
+        if (!surface_widget) continue;
+        const double w = (double)gtk_widget_get_width(surface_widget);
+        const double h = (double)gtk_widget_get_height(surface_widget);
+        GtkNative *native = gtk_widget_get_native(surface_widget);
+        GdkSurface *surface = native ? gtk_native_get_surface(native) : NULL;
         const double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
         if (w > 0 && h > 0 && (w != win->emitted_width || h != win->emitted_height || scale != win->emitted_scale)) {
             win->emitted_width = w;
@@ -2444,6 +2836,17 @@ static gboolean on_close_request(GtkWindow *window, gpointer data) {
             break;
         }
     }
+    /* A GtkPopover is parent-owned. Retire popup children while the
+     * parent's widget tree is still alive; otherwise GTK finalizes
+     * their widgets first and the later runtime teardown would touch
+     * dangling canvas/popover pointers. */
+    for (int i = 0; i < host->window_count; i++) {
+        native_sdk_gtk_window_t *child = &host->windows[i];
+        if (child == win || child->popup_parent_id != win->id) continue;
+        native_sdk_emit_window_frame(host, child, 0);
+        native_sdk_clear_window(child);
+    }
+
     native_sdk_emit_window_frame(host, win, 0);
 
     if (closed_index >= 0) {
@@ -2774,7 +3177,8 @@ static void native_sdk_window_apply_transparent(native_sdk_gtk_window_t *win) {
  * window keeps taking clicks, which is the honest degradation. */
 static void native_sdk_window_apply_click_through(GtkWidget *widget, gpointer data) {
     (void)data;
-    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(widget));
+    GtkNative *native = gtk_widget_get_native(widget);
+    GdkSurface *surface = native ? gtk_native_get_surface(native) : NULL;
     if (!surface) return;
     /* An EMPTY region, not a NULL one: passing NULL RESETS the input
      * region to the whole surface, the opposite of the intent. */
@@ -2807,12 +3211,106 @@ static void native_sdk_window_apply_flags(native_sdk_gtk_window_t *win, int wind
     }
 }
 
+/* Create a real Wayland child popup, not another toplevel. GtkPopover
+ * projects to GdkPopup/xdg_popup, so the compositor owns its position
+ * relative to the parent surface and moves it atomically with that
+ * parent. The app's GPU canvas draws every visible pixel. */
+static native_sdk_gtk_window_t *native_sdk_create_popup_internal(
+    native_sdk_gtk_host_t *host,
+    uint64_t window_id,
+    const char *title,
+    const char *label,
+    double width,
+    double height,
+    double anchor_x,
+    double anchor_y,
+    int window_flags,
+    uint64_t popup_parent_id
+) {
+    native_sdk_gtk_window_t *parent = native_sdk_find_window(host, popup_parent_id);
+    if (!parent || !parent->stack_root || native_sdk_find_window(host, window_id)) return NULL;
+
+    int slot = -1;
+    for (int i = 0; i < host->window_count; i++) {
+        if (!host->windows[i].gtk_window && !host->windows[i].popup) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (host->window_count >= NATIVE_SDK_MAX_WINDOWS) return NULL;
+        slot = host->window_count++;
+    }
+
+    native_sdk_gtk_window_t *win = &host->windows[slot];
+    memset(win, 0, sizeof(*win));
+    win->id = window_id;
+    win->host = host;
+    win->popup_parent_id = popup_parent_id;
+    win->label = native_sdk_strndup(label && label[0] ? label : "popup", strlen(label && label[0] ? label : "popup"));
+    win->title = native_sdk_strndup(title ? title : "", strlen(title ? title : ""));
+    if (!win->label || !win->title) {
+        free(win->label);
+        free(win->title);
+        memset(win, 0, sizeof(*win));
+        return NULL;
+    }
+
+    win->popup = gtk_popover_new();
+    g_object_weak_ref(G_OBJECT(win->popup), native_sdk_popup_finalized, win);
+    gtk_popover_set_autohide(GTK_POPOVER(win->popup), FALSE);
+    gtk_popover_set_has_arrow(GTK_POPOVER(win->popup), FALSE);
+    gtk_popover_set_position(GTK_POPOVER(win->popup), GTK_POS_TOP);
+    gtk_widget_add_css_class(win->popup, "native-sdk-surface-popup");
+    gtk_widget_set_parent(win->popup, parent->stack_root);
+
+    GdkRectangle anchor = {
+        .x = (int)round(anchor_x),
+        .y = (int)round(anchor_y),
+        .width = 1,
+        .height = 1,
+    };
+    gtk_popover_set_pointing_to(GTK_POPOVER(win->popup), &anchor);
+
+    win->root_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(win->root_box, (int)width, (int)height);
+    win->stack_root = gtk_overlay_new();
+    gtk_widget_set_hexpand(win->stack_root, TRUE);
+    gtk_widget_set_vexpand(win->stack_root, TRUE);
+    gtk_box_append(GTK_BOX(win->root_box), win->stack_root);
+    gtk_popover_set_child(GTK_POPOVER(win->popup), win->root_box);
+
+    if (window_flags & NATIVE_SDK_WINDOW_FLAG_CLICK_THROUGH) {
+        g_signal_connect(win->popup, "realize", G_CALLBACK(native_sdk_window_apply_click_through), NULL);
+        g_signal_connect(win->popup, "map", G_CALLBACK(native_sdk_window_apply_click_through), NULL);
+    }
+    if (window_flags & NATIVE_SDK_WINDOW_FLAG_TRANSPARENT) {
+        GtkCssProvider *provider = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(
+            provider,
+            "popover.native-sdk-surface-popup > contents {"
+            " background: transparent;"
+            " box-shadow: none;"
+            " border: none;"
+            " padding: 0;"
+            "}");
+        gtk_style_context_add_provider_for_display(
+            gtk_widget_get_display(win->popup),
+            GTK_STYLE_PROVIDER(provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(provider);
+    }
+
+    gtk_popover_popup(GTK_POPOVER(win->popup));
+    return win;
+}
+
 static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height) {
     if (native_sdk_find_window(host, window_id)) return NULL;
 
     int slot = -1;
     for (int i = 0; i < host->window_count; i++) {
-        if (!host->windows[i].gtk_window) {
+        if (!host->windows[i].gtk_window && !host->windows[i].popup) {
             slot = i;
             break;
         }
@@ -3071,6 +3569,9 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
     for (int i = 0; i < host->window_count; i++) {
         native_sdk_clear_window(&host->windows[i]);
     }
+    native_sdk_gtk_remove_tray(host);
+    native_sdk_clear_menu_actions(host);
+    if (host->menu_model) g_object_unref(host->menu_model);
     g_object_unref(host->app);
     free(host->app_name);
     free(host->window_title);
@@ -3080,8 +3581,6 @@ void native_sdk_gtk_destroy(native_sdk_gtk_host_t *host) {
     native_sdk_free_string_list(host->allowed_origins, host->allowed_origins_count);
     native_sdk_free_string_list(host->allowed_external_urls, host->allowed_external_urls_count);
     native_sdk_clear_shortcuts(host);
-    native_sdk_clear_menu_actions(host);
-    if (host->menu_model) g_object_unref(host->menu_model);
     free(host);
 }
 
@@ -3527,6 +4026,131 @@ void native_sdk_gtk_set_menus(native_sdk_gtk_host_t *host, const char *const *me
     for (int i = 0; i < host->window_count; i++) native_sdk_apply_menu_model_to_window(host, &host->windows[i]);
 }
 
+void native_sdk_gtk_remove_tray(native_sdk_gtk_host_t *host) {
+    if (!host) return;
+    native_sdk_gtk_tray_t *tray = &host->tray;
+    if (tray->bus && tray->item_registration_id) g_dbus_connection_unregister_object(tray->bus, tray->item_registration_id);
+    if (tray->bus && tray->menu_registration_id) g_dbus_connection_unregister_object(tray->bus, tray->menu_registration_id);
+    if (tray->bus && tray->bus_name) {
+        GError *error = NULL;
+        GVariant *reply = g_dbus_connection_call_sync(
+            tray->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+            "org.freedesktop.DBus", "ReleaseName", g_variant_new("(s)", tray->bus_name),
+            G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, &error);
+        if (reply) g_variant_unref(reply);
+        if (error) g_error_free(error);
+    }
+    if (tray->bus) g_object_unref(tray->bus);
+    for (size_t index = 0; index < tray->item_count; index++) {
+        free(tray->items[index].label);
+    }
+    free(tray->bus_name);
+    free(tray->icon_path);
+    free(tray->tooltip);
+    memset(tray, 0, sizeof(*tray));
+}
+
+int native_sdk_gtk_create_tray(native_sdk_gtk_host_t *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len) {
+    if (!host) return 0;
+    native_sdk_gtk_remove_tray(host);
+    native_sdk_gtk_tray_t *tray = &host->tray;
+    tray->icon_path = native_sdk_strndup(icon_path ? icon_path : "", icon_path ? icon_path_len : 0);
+    tray->tooltip = native_sdk_strndup(tooltip ? tooltip : "", tooltip ? tooltip_len : 0);
+    tray->bus_name = g_strdup_printf("org.kde.StatusNotifierItem-%u-1", (unsigned)getpid());
+    tray->revision = 1;
+    if (!tray->icon_path || !tray->tooltip || !tray->bus_name) {
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+
+    GError *error = NULL;
+    tray->bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
+    if (!tray->bus) {
+        if (error) g_error_free(error);
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+    if (!native_sdk_sni_info) native_sdk_sni_info = g_dbus_node_info_new_for_xml(native_sdk_sni_xml, NULL);
+    if (!native_sdk_dbusmenu_info) native_sdk_dbusmenu_info = g_dbus_node_info_new_for_xml(native_sdk_dbusmenu_xml, NULL);
+    if (!native_sdk_sni_info || !native_sdk_dbusmenu_info) {
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+
+    GVariant *name_reply = g_dbus_connection_call_sync(
+        tray->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "RequestName", g_variant_new("(su)", tray->bus_name, 0u),
+        G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, &error);
+    if (!name_reply) {
+        if (error) g_error_free(error);
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+    guint32 request_result = 0;
+    g_variant_get(name_reply, "(u)", &request_result);
+    g_variant_unref(name_reply);
+    if (request_result != 1 && request_result != 4) {
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+
+    tray->item_registration_id = g_dbus_connection_register_object(
+        tray->bus, "/StatusNotifierItem", native_sdk_sni_info->interfaces[0],
+        &native_sdk_sni_vtable, host, NULL, &error);
+    if (!tray->item_registration_id) {
+        if (error) g_error_free(error);
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+    tray->menu_registration_id = g_dbus_connection_register_object(
+        tray->bus, "/Menu", native_sdk_dbusmenu_info->interfaces[0],
+        &native_sdk_dbusmenu_vtable, host, NULL, &error);
+    if (!tray->menu_registration_id) {
+        if (error) g_error_free(error);
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+
+    GVariant *watch_reply = g_dbus_connection_call_sync(
+        tray->bus, "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem",
+        g_variant_new("(s)", tray->bus_name), NULL,
+        G_DBUS_CALL_FLAGS_NONE, 1000, NULL, &error);
+    if (!watch_reply) {
+        if (error) g_error_free(error);
+        native_sdk_gtk_remove_tray(host);
+        return 0;
+    }
+    g_variant_unref(watch_reply);
+    return 1;
+}
+
+int native_sdk_gtk_update_tray_menu(native_sdk_gtk_host_t *host, const uint32_t *item_ids, const char *const *item_labels, const size_t *item_label_lens, const int *item_separators, const int *item_enabled, size_t item_count) {
+    if (!host || !host->tray.bus || item_count > NATIVE_SDK_MAX_TRAY_ITEMS) return 0;
+    native_sdk_gtk_tray_t *tray = &host->tray;
+    for (size_t index = 0; index < tray->item_count; index++) {
+        free(tray->items[index].label);
+        memset(&tray->items[index], 0, sizeof(tray->items[index]));
+    }
+    tray->item_count = 0;
+    for (size_t index = 0; index < item_count; index++) {
+        native_sdk_gtk_tray_item_t *item = &tray->items[index];
+        item->id = item_ids[index];
+        item->label = native_sdk_strndup(item_labels[index], item_label_lens[index]);
+        item->separator = item_separators[index] != 0;
+        item->enabled = item_enabled[index] != 0;
+        if (!item->label) {
+            tray->item_count = index + 1;
+            return 0;
+        }
+        tray->item_count = index + 1;
+    }
+    tray->revision++;
+    g_dbus_connection_emit_signal(tray->bus, NULL, "/Menu", "com.canonical.dbusmenu",
+                                  "LayoutUpdated", g_variant_new("(ui)", tray->revision, 0), NULL);
+    return 1;
+}
+
 void native_sdk_gtk_set_shortcuts(native_sdk_gtk_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
     if (!host) return;
     native_sdk_clear_shortcuts(host);
@@ -3551,15 +4175,39 @@ void native_sdk_gtk_set_shortcuts(native_sdk_gtk_host_t *host, const char *const
     }
 }
 
-int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height) {
+int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height, uint64_t popup_parent_id) {
     char *title = window_title_len > 0 ? native_sdk_strndup(window_title, window_title_len) : NULL;
     char *label = window_label_len > 0 ? native_sdk_strndup(window_label, window_label_len) : NULL;
-    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, window_flags, min_width, min_height);
+    native_sdk_gtk_window_t *win = popup_parent_id != 0
+        ? native_sdk_create_popup_internal(host, window_id, title, label, width, height, x, y, window_flags, popup_parent_id)
+        : native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, window_flags, min_width, min_height);
     free(title);
     free(label);
     if (!win) return 0;
 
-    gtk_window_present(win->gtk_window);
+    if (win->popup) {
+        native_sdk_emit_resize(host, win);
+        native_sdk_emit_window_frame(host, win, 1);
+    } else {
+        gtk_window_present(win->gtk_window);
+    }
+    return 1;
+}
+
+int native_sdk_gtk_update_popup_window(native_sdk_gtk_host_t *host, uint64_t window_id, double width, double height, double anchor_x, double anchor_y) {
+    native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    if (!win || !win->popup || !win->root_box || width <= 0 || height <= 0) return 0;
+    gtk_widget_set_size_request(win->root_box, (int)round(width), (int)round(height));
+    GdkRectangle anchor = {
+        .x = (int)round(anchor_x),
+        .y = (int)round(anchor_y),
+        .width = 1,
+        .height = 1,
+    };
+    gtk_popover_set_pointing_to(GTK_POPOVER(win->popup), &anchor);
+    gtk_popover_present(GTK_POPOVER(win->popup));
+    native_sdk_emit_resize(host, win);
+    native_sdk_emit_window_frame(host, win, 1);
     return 1;
 }
 
@@ -3650,6 +4298,87 @@ int native_sdk_gtk_set_window_drag_regions(native_sdk_gtk_host_t *host, uint64_t
     return 1;
 }
 
+int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const native_sdk_gtk_context_menu_item_t *items, size_t count) {
+    if (!host || !label || label_len == 0 || !items || count == 0) return 0;
+    native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
+    if (!win) return 0;
+
+    char *label_copy = native_sdk_strndup(label, label_len);
+    if (!label_copy) return 0;
+    native_sdk_gtk_native_view_t *view = native_sdk_find_native_view(win, label_copy);
+    if (!view || !view->widget) {
+        free(label_copy);
+        return 0;
+    }
+    if (host->context_popover) {
+        gtk_popover_popdown(GTK_POPOVER(host->context_popover));
+        if (host->context_popover) {
+            free(label_copy);
+            return 0;
+        }
+    }
+
+    native_sdk_gtk_context_menu_session_t *session = calloc(1, sizeof(*session));
+    if (!session) {
+        free(label_copy);
+        return 0;
+    }
+    GtkWidget *popover = gtk_popover_new();
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    if (!popover || !box) {
+        if (popover) g_object_unref(popover);
+        if (box) g_object_unref(box);
+        free(label_copy);
+        free(session);
+        return 0;
+    }
+
+    session->host = host;
+    session->popover = popover;
+    session->window_id = window_id;
+    session->token = token;
+    session->view_label = label_copy;
+    g_object_set_data_full(G_OBJECT(popover), "native-sdk-context-menu-session", session, native_sdk_context_menu_session_destroy);
+
+    gtk_widget_set_margin_top(box, 4);
+    gtk_widget_set_margin_bottom(box, 4);
+    gtk_widget_set_margin_start(box, 4);
+    gtk_widget_set_margin_end(box, 4);
+    for (size_t index = 0; index < count; index++) {
+        const native_sdk_gtk_context_menu_item_t *item = &items[index];
+        if (item->separator) {
+            gtk_box_append(GTK_BOX(box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+            continue;
+        }
+        char *item_label = native_sdk_strndup(item->label ? item->label : "", item->label ? item->label_len : 0);
+        GtkWidget *button = gtk_button_new_with_label(item_label ? item_label : "");
+        free(item_label);
+        gtk_widget_set_sensitive(button, item->enabled != 0);
+        gtk_widget_set_halign(button, GTK_ALIGN_FILL);
+        gtk_widget_add_css_class(button, "flat");
+        native_sdk_gtk_context_menu_button_t *action = malloc(sizeof(*action));
+        if (action) {
+            action->session = session;
+            action->item_id = item->item_id;
+            g_signal_connect_data(button, "clicked", G_CALLBACK(native_sdk_context_menu_button_clicked), action, native_sdk_context_menu_button_destroy, 0);
+        } else {
+            gtk_widget_set_sensitive(button, FALSE);
+        }
+        gtk_box_append(GTK_BOX(box), button);
+    }
+
+    gtk_popover_set_child(GTK_POPOVER(popover), box);
+    gtk_popover_set_autohide(GTK_POPOVER(popover), TRUE);
+    gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
+    GdkRectangle point = { .x = (int)x, .y = (int)y, .width = 1, .height = 1 };
+    gtk_popover_set_pointing_to(GTK_POPOVER(popover), &point);
+    gtk_widget_set_parent(popover, view->widget);
+    g_signal_connect(popover, "closed", G_CALLBACK(native_sdk_context_menu_closed), session);
+    host->context_popover = popover;
+    gtk_popover_popup(GTK_POPOVER(popover));
+    return 1;
+}
+
 /* Chrome geometry for hidden-titlebar (client-side decorated) windows.
  * Everything is live widget geometry, never a hardcoded pixel count:
  * the band height is the header bar's allocation (its natural measure
@@ -3728,7 +4457,14 @@ int native_sdk_gtk_window_chrome(native_sdk_gtk_host_t *host, uint64_t window_id
 
 int native_sdk_gtk_focus_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
-    if (!win || !win->gtk_window) return 0;
+    if (!win) return 0;
+    if (win->popup) {
+        gtk_popover_present(GTK_POPOVER(win->popup));
+        gtk_popover_popup(GTK_POPOVER(win->popup));
+        native_sdk_emit_window_frame(host, win, 1);
+        return 1;
+    }
+    if (!win->gtk_window) return 0;
     gtk_window_present(win->gtk_window);
     native_sdk_emit_window_frame(host, win, 1);
     return 1;
@@ -3736,7 +4472,13 @@ int native_sdk_gtk_focus_window(native_sdk_gtk_host_t *host, uint64_t window_id)
 
 int native_sdk_gtk_close_window(native_sdk_gtk_host_t *host, uint64_t window_id) {
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
-    if (!win || !win->gtk_window) return 0;
+    if (!win) return 0;
+    if (win->popup) {
+        native_sdk_emit_window_frame(host, win, 0);
+        native_sdk_clear_window(win);
+        return 1;
+    }
+    if (!win->gtk_window) return 0;
     gtk_window_close(win->gtk_window);
     return 1;
 }

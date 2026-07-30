@@ -290,6 +290,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             floating: bool = false,
             transparent: bool = false,
             click_through: bool = false,
+            /// Label of an already-live parent window. When set, the
+            /// platform creates this descriptor as a compositor-managed
+            /// popup child rather than a second toplevel.
+            popup_parent: ?[]const u8 = null,
             /// Content min-size floor the WINDOW enforces (macOS
             /// `contentMinSize`): the user's resize stops at the floor
             /// instead of the layout clamping/clipping panes below
@@ -718,6 +722,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             on_close: ?MsgT = null,
             installed: bool = false,
             canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
+            popup_anchor_x: f32 = 0,
+            popup_anchor_y: f32 = 0,
+            is_popup: bool = false,
             /// The device scale of THIS window's surface, adopted from
             /// its own frame and resize events. Secondary windows can sit
             /// on a different-density monitor than the main canvas, so
@@ -727,6 +734,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// hairlines snap against the grid it actually renders on.
             /// The main canvas keeps its scale in `Self.pixel_snap_scale`.
             pixel_snap_scale: f32 = 1,
+            /// CPU pixel presenters use `.load` for dirty-rect frames, so
+            /// the previous pixels are part of this surface's retained
+            /// state. Secondary surfaces must not share these buffers:
+            /// rendering one window into another window's baseline leaves
+            /// the untouched transparent area carrying foreign pixels.
+            pixel_buffer: []u8 = &.{},
+            pixel_scratch: []u8 = &.{},
             tree: ?Ui.Tree = null,
             arena_index: usize = 0,
             arenas: [2]std.heap.ArenaAllocator,
@@ -1033,6 +1047,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (&self.window_slots) |*slot| {
                 slot.arenas[0].deinit();
                 slot.arenas[1].deinit();
+                if (slot.pixel_buffer.len > 0) self.backing.free(slot.pixel_buffer);
+                if (slot.pixel_scratch.len > 0) self.backing.free(slot.pixel_scratch);
             }
             if (self.pixel_buffer.len > 0) self.backing.free(self.pixel_buffer);
             if (self.pixel_scratch.len > 0) self.backing.free(self.pixel_scratch);
@@ -1833,7 +1849,32 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             for (declared) |descriptor| {
                 if (self.windowSlotIndexByLabel(descriptor.label)) |slot_index| {
                     // Already live: the close Msg follows the model.
-                    self.window_slots[slot_index].on_close = descriptor.on_close;
+                    const slot = &self.window_slots[slot_index];
+                    slot.on_close = descriptor.on_close;
+                    if (descriptor.popup_parent != null) {
+                        const anchor_x = descriptor.x orelse 0;
+                        const anchor_y = descriptor.y orelse 0;
+                        if (!slot.is_popup or
+                            slot.canvas_size.width != descriptor.width or
+                            slot.canvas_size.height != descriptor.height or
+                            slot.popup_anchor_x != anchor_x or
+                            slot.popup_anchor_y != anchor_y)
+                        {
+                            runtime.options.platform.services.updatePopupWindow(
+                                slot.window_id,
+                                descriptor.width,
+                                descriptor.height,
+                                anchor_x,
+                                anchor_y,
+                            ) catch |err| {
+                                ui_app_log.warn("declared popup window '{s}' update failed: {s}", .{ descriptor.label, @errorName(err) });
+                            };
+                            slot.canvas_size = .{ .width = descriptor.width, .height = descriptor.height };
+                            slot.popup_anchor_x = anchor_x;
+                            slot.popup_anchor_y = anchor_y;
+                            slot.is_popup = true;
+                        }
+                    }
                     continue;
                 }
                 self.createWindowSlot(runtime, descriptor);
@@ -1891,6 +1932,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
 
             const shell_views = [_]app_manifest.ShellView{self.secondaryShellView(descriptor)};
+            const popup_parent_id = if (descriptor.popup_parent) |parent_label|
+                effectsWindowIdByLabel(runtime, parent_label) orelse {
+                    ui_app_log.warn(
+                        "declared popup window '{s}' ignored: parent window '{s}' is not live",
+                        .{ descriptor.label, parent_label },
+                    );
+                    return;
+                }
+            else
+                0;
             const info = runtime.createSourcelessShellWindow(.{
                 .label = descriptor.label,
                 .title = if (descriptor.title.len > 0) descriptor.title else null,
@@ -1902,6 +1953,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .floating = descriptor.floating,
                 .transparent = descriptor.transparent,
                 .click_through = descriptor.click_through,
+                .popup_parent_id = popup_parent_id,
                 .titlebar = descriptor.titlebar,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,
@@ -1923,6 +1975,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.on_close = descriptor.on_close;
             slot.installed = false;
             slot.canvas_size = .{ .width = descriptor.width, .height = descriptor.height };
+            slot.popup_anchor_x = descriptor.x orelse 0;
+            slot.popup_anchor_y = descriptor.y orelse 0;
+            slot.is_popup = descriptor.popup_parent != null;
             // Until this window's first frame reports its real density,
             // assume the main canvas's — new windows usually open on the
             // same monitor, and the installing frame corrects the guess.
@@ -1971,6 +2026,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.window_slot_count = last;
             removed.arenas[0].deinit();
             removed.arenas[1].deinit();
+            if (removed.pixel_buffer.len > 0) self.backing.free(removed.pixel_buffer);
+            if (removed.pixel_scratch.len > 0) self.backing.free(removed.pixel_scratch);
             runtime.closeWindow(window_id) catch |err| {
                 ui_app_log.warn("declared window close failed: {s}", .{@errorName(err)});
             };
@@ -1987,6 +2044,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.window_slot_count = last;
             removed.arenas[0].deinit();
             removed.arenas[1].deinit();
+            if (removed.pixel_buffer.len > 0) self.backing.free(removed.pixel_buffer);
+            if (removed.pixel_scratch.len > 0) self.backing.free(removed.pixel_scratch);
             return on_close;
         }
 
@@ -3028,7 +3087,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     self.applyWebPanes(runtime, frame_event.window_id, layout);
                 } else |_| {}
             }
-            try self.presentFrame(runtime, frame_event, self.options.canvas_label, installing);
+            try self.presentFrame(runtime, frame_event, self.options.canvas_label, installing, null);
             if (installing) return;
             const on_frame = self.options.on_frame orelse return;
             const gpu_frame = runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label) catch return;
@@ -3074,7 +3133,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 slot.canvas_size = frame_event.size;
                 try self.rebuildWindowSlot(runtime, slot);
             }
-            try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing);
+            try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing, slot);
         }
 
         /// Present the planned canvas frame: GPU packet when the platform
@@ -3084,7 +3143,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// reports `UnsupportedService` at present time also falls back to
         /// pixels; that attempt forces a full repaint because the failed
         /// packet plan already recorded the frame's presented summary.
-        fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent, canvas_label: []const u8, installing: bool) anyerror!void {
+        fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent, canvas_label: []const u8, installing: bool, window_slot: ?*WindowSlot) anyerror!void {
             // The installing frame must paint unconditionally: on software
             // platforms with no window-manager-driven resizes, nothing else
             // invalidates before the first present, and the surface would
@@ -3119,7 +3178,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (packet_presented) return;
             }
             if (services.present_gpu_surface_pixels_fn == null) return;
-            self.ensurePixelBuffers(frame_event.size, frame_event.scale_factor) catch return;
+            const pixel_buffer = if (window_slot) |slot| &slot.pixel_buffer else &self.pixel_buffer;
+            const pixel_scratch = if (window_slot) |slot| &slot.pixel_scratch else &self.pixel_scratch;
+            self.ensurePixelBuffers(frame_event.size, frame_event.scale_factor, pixel_buffer, pixel_scratch) catch return;
             _ = runtime.presentNextCanvasFramePixels(
                 frame_event.window_id,
                 canvas_label,
@@ -3131,8 +3192,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .full_repaint = frame_event.canvas_frame_full_repaint or packet_attempted or installing,
                 },
                 runtime.canvasFrameScratchStorage(),
-                self.pixel_buffer,
-                self.pixel_scratch,
+                pixel_buffer.*,
+                pixel_scratch.*,
                 clear_color,
             ) catch |err| switch (err) {
                 error.UnsupportedService, error.UnsupportedViewKind => {},
@@ -3142,17 +3203,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Grow the heap pixel buffers to hold the surface at the given
         /// scale. No-op when they are already large enough.
-        fn ensurePixelBuffers(self: *Self, surface_size: geometry.SizeF, scale_factor: f32) anyerror!void {
+        fn ensurePixelBuffers(self: *Self, surface_size: geometry.SizeF, scale_factor: f32, pixel_buffer: *[]u8, pixel_scratch: *[]u8) anyerror!void {
             const pixel_size = try canvas_frame.canvasSurfacePixelSize(surface_size, scale_factor);
-            if (self.pixel_buffer.len < pixel_size.byte_len) {
-                if (self.pixel_buffer.len > 0) self.backing.free(self.pixel_buffer);
-                self.pixel_buffer = &.{};
-                self.pixel_buffer = try self.backing.alloc(u8, pixel_size.byte_len);
+            if (pixel_buffer.len < pixel_size.byte_len) {
+                if (pixel_buffer.len > 0) self.backing.free(pixel_buffer.*);
+                pixel_buffer.* = &.{};
+                pixel_buffer.* = try self.backing.alloc(u8, pixel_size.byte_len);
             }
-            if (self.pixel_scratch.len < pixel_size.byte_len) {
-                if (self.pixel_scratch.len > 0) self.backing.free(self.pixel_scratch);
-                self.pixel_scratch = &.{};
-                self.pixel_scratch = try self.backing.alloc(u8, pixel_size.byte_len);
+            if (pixel_scratch.len < pixel_size.byte_len) {
+                if (pixel_scratch.len > 0) self.backing.free(pixel_scratch.*);
+                pixel_scratch.* = &.{};
+                pixel_scratch.* = try self.backing.alloc(u8, pixel_size.byte_len);
             }
         }
 

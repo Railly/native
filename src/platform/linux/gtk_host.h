@@ -30,6 +30,8 @@ typedef enum {
     NATIVE_SDK_GTK_EVENT_APPEARANCE = 16,
     NATIVE_SDK_GTK_EVENT_AUDIO = 17,
     NATIVE_SDK_GTK_EVENT_URLS_OPENED = 18,
+    NATIVE_SDK_GTK_EVENT_CONTEXT_MENU_ACTION = 19,
+    NATIVE_SDK_GTK_EVENT_TRAY_ACTION = 20,
 } native_sdk_gtk_event_kind_t;
 
 typedef struct {
@@ -95,6 +97,10 @@ typedef struct {
      * NUL, so the separator stays unambiguous). */
     const char *open_urls;
     size_t open_urls_len;
+    /* Native context-menu result: widget token plus selected item id
+     * (0 means the menu was dismissed). */
+    uint64_t widget_id;
+    uint32_t menu_item_id;
 } native_sdk_gtk_event_t;
 
 typedef void (*native_sdk_gtk_event_callback_t)(void *context, const native_sdk_gtk_event_t *event);
@@ -115,6 +121,14 @@ typedef struct {
     size_t count;
     size_t bytes_written;
 } native_sdk_gtk_open_dialog_result_t;
+
+typedef struct {
+    uint32_t item_id;
+    const char *label;
+    size_t label_len;
+    int enabled;
+    int separator;
+} native_sdk_gtk_context_menu_item_t;
 
 typedef struct {
     const char *title;
@@ -176,8 +190,12 @@ void native_sdk_gtk_bridge_respond_webview(native_sdk_gtk_host_t *host, uint64_t
 void native_sdk_gtk_emit_window_event(native_sdk_gtk_host_t *host, uint64_t window_id, const char *name, size_t name_len, const char *detail_json, size_t detail_json_len);
 void native_sdk_gtk_set_security_policy(native_sdk_gtk_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action);
 void native_sdk_gtk_set_menus(native_sdk_gtk_host_t *host, const char *const *menu_titles, const size_t *menu_title_lens, size_t menu_count, const uint32_t *item_menu_indices, const char *const *item_labels, const size_t *item_label_lens, const char *const *item_commands, const size_t *item_command_lens, const char *const *item_keys, const size_t *item_key_lens, const uint32_t *item_modifiers, const int *item_separators, const int *item_enabled, const int *item_checked, size_t item_count);
+int native_sdk_gtk_create_tray(native_sdk_gtk_host_t *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len);
+int native_sdk_gtk_update_tray_menu(native_sdk_gtk_host_t *host, const uint32_t *item_ids, const char *const *item_labels, const size_t *item_label_lens, const int *item_separators, const int *item_enabled, size_t item_count);
+void native_sdk_gtk_remove_tray(native_sdk_gtk_host_t *host);
 void native_sdk_gtk_set_shortcuts(native_sdk_gtk_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
-int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height);
+int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int window_flags, double min_width, double min_height, uint64_t popup_parent_id);
+int native_sdk_gtk_update_popup_window(native_sdk_gtk_host_t *host, uint64_t window_id, double width, double height, double anchor_x, double anchor_y);
 /* Ask the windowing system to start an interactive move from the last
  * pointer press (the widget `window_drag` channel). Returns 0 when the
  * window is unknown or no press has been recorded yet. */
@@ -190,6 +208,9 @@ int native_sdk_gtk_start_window_drag(native_sdk_gtk_host_t *host, uint64_t windo
  * exclusion) begins a system window move instead of a widget press.
  * Returns 0 when the window or view is unknown. */
 int native_sdk_gtk_set_window_drag_regions(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, const double *rects, const int *exclusions, size_t count);
+/* Present a native GTK popover menu at a gpu-surface-local point.
+ * Selection or dismissal returns asynchronously as CONTEXT_MENU_ACTION. */
+int native_sdk_gtk_show_context_menu(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, double x, double y, uint64_t token, const native_sdk_gtk_context_menu_item_t *items, size_t count);
 /* Chrome geometry for hidden-titlebar (client-side decorated) windows:
  * the header-bar band height on top, the window-control cluster's
  * extent on the left or right edge (whichever side the user's

@@ -170,6 +170,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .floating = shell_window.floating,
                 .transparent = shell_window.transparent,
                 .click_through = shell_window.click_through,
+                .popup_parent_id = shell_window.popup_parent_id,
                 .restore_state = shell_window.restore_state,
                 .restore_policy = shellRestorePolicy(shell_window.restore_policy),
                 .titlebar = shell_layout.shellTitlebarStyle(shell_window.titlebar),
