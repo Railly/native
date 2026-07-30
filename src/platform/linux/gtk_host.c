@@ -253,7 +253,10 @@ typedef struct native_sdk_gtk_native_view {
     native_sdk_gtk_drag_region_t *drag_regions;
     size_t drag_region_count;
     int gpu_drag_claimed_press;
+    int gpu_native_drag_pending;
     int gpu_native_drag_active;
+    double gpu_native_drag_press_x;
+    double gpu_native_drag_press_y;
 } native_sdk_gtk_native_view_t;
 
 typedef struct native_sdk_gtk_app_timer {
@@ -854,9 +857,12 @@ static void native_sdk_emit_gpu_surface_input(native_sdk_gtk_native_view_t *view
  * receive pointer motion while gdk_toplevel_begin_move is active. Surface
  * the lifecycle through the ordinary app command channel: apps can animate
  * the gesture without attempting to reposition the toplevel themselves. */
-static void native_sdk_emit_window_drag_command(native_sdk_gtk_native_view_t *view, int started) {
+static void native_sdk_emit_window_drag_command(native_sdk_gtk_native_view_t *view, int started, int direction) {
     if (!view || !view->window || !view->window->host || !view->label) return;
-    const char *command = started ? "native-sdk.window-drag.begin" : "native-sdk.window-drag.end";
+    const char *command = !started ? "native-sdk.window-drag.end"
+        : direction > 0 ? "native-sdk.window-drag.begin-right"
+        : direction < 0 ? "native-sdk.window-drag.begin-left"
+        : "native-sdk.window-drag.begin";
     native_sdk_emit(view->window->host, (native_sdk_gtk_event_t){
         .kind = NATIVE_SDK_GTK_EVENT_NATIVE_COMMAND,
         .window_id = view->window->id,
@@ -1288,9 +1294,13 @@ static void native_sdk_gpu_pointer_pressed(GtkGestureClick *gesture, int n_press
         if (n_press >= 2) {
             native_sdk_window_apply_titlebar_double_click(view->window);
         } else {
-            native_sdk_window_begin_interactive_move(view->window);
-            view->gpu_native_drag_active = 1;
-            native_sdk_emit_window_drag_command(view, 1);
+            /* Wait for the first real drag delta before handing the
+             * pointer to Wayland. Once gdk_toplevel_begin_move runs the
+             * compositor owns motion, so this is the only portable
+             * opportunity to identify horizontal direction. */
+            view->gpu_native_drag_pending = 1;
+            view->gpu_native_drag_press_x = x;
+            view->gpu_native_drag_press_y = y;
         }
         return;
     }
@@ -1309,9 +1319,10 @@ static void native_sdk_gpu_pointer_released(GtkGestureClick *gesture, int n_pres
      * never saw the down, so it must not see an orphaned up either. */
     if (view->gpu_drag_claimed_press) {
         view->gpu_drag_claimed_press = 0;
+        view->gpu_native_drag_pending = 0;
         if (view->gpu_native_drag_active) {
             view->gpu_native_drag_active = 0;
-            native_sdk_emit_window_drag_command(view, 0);
+            native_sdk_emit_window_drag_command(view, 0, 0);
         }
         return;
     }
@@ -1324,6 +1335,17 @@ static void native_sdk_gpu_pointer_released(GtkGestureClick *gesture, int n_pres
 static void native_sdk_gpu_pointer_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data) {
     native_sdk_gtk_native_view_t *view = data;
     if (!view) return;
+    if (view->gpu_native_drag_pending) {
+        const double dx = x - view->gpu_native_drag_press_x;
+        const double dy = y - view->gpu_native_drag_press_y;
+        if (dx * dx + dy * dy >= 9.0) {
+            view->gpu_native_drag_pending = 0;
+            view->gpu_native_drag_active = 1;
+            native_sdk_emit_window_drag_command(view, 1, dx > 0 ? 1 : dx < 0 ? -1 : 0);
+            native_sdk_window_begin_interactive_move(view->window);
+        }
+        return;
+    }
     view->gpu_pointer_x = x;
     view->gpu_pointer_y = y;
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
