@@ -467,6 +467,9 @@ pub const ShellWindow = struct {
     transparent: bool = false,
     /// The window ignores mouse events entirely; clicks fall through.
     click_through: bool = false,
+    /// Runtime-created popup parent. Zero keeps the ordinary toplevel
+    /// role. Startup manifest windows must remain toplevels.
+    popup_parent_id: u64 = 0,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor. Like

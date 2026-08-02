@@ -33,6 +33,8 @@ const GtkEventKind = enum(c_int) {
     appearance = 16,
     audio = 17,
     urls_opened = 18,
+    context_menu_action = 19,
+    tray_action = 20,
 };
 
 const GtkEvent = extern struct {
@@ -96,6 +98,8 @@ const GtkEvent = extern struct {
     /// NUL-separated, reusing the drop-path wire shape.
     open_urls: [*]const u8,
     open_urls_len: usize,
+    widget_id: u64,
+    menu_item_id: u32,
 };
 
 const GtkCallback = *const fn (context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void;
@@ -106,6 +110,14 @@ const shortcut_modifier_command: u32 = 1 << 1;
 const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
+
+const GtkContextMenuItem = extern struct {
+    item_id: u32,
+    label: [*]const u8,
+    label_len: usize,
+    enabled: c_int,
+    separator: c_int,
+};
 
 extern fn native_sdk_gtk_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, window_flags: c_int, min_width: f64, min_height: f64) ?*GtkHost;
 extern fn native_sdk_gtk_destroy(host: *GtkHost) void;
@@ -123,10 +135,15 @@ extern fn native_sdk_gtk_bridge_respond_webview(host: *GtkHost, window_id: u64, 
 extern fn native_sdk_gtk_emit_window_event(host: *GtkHost, window_id: u64, name: [*]const u8, name_len: usize, detail_json: [*]const u8, detail_json_len: usize) void;
 extern fn native_sdk_gtk_set_security_policy(host: *GtkHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_gtk_set_menus(host: *GtkHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
+extern fn native_sdk_gtk_create_tray(host: *GtkHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize) c_int;
+extern fn native_sdk_gtk_update_tray_menu(host: *GtkHost, item_ids: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_count: usize) c_int;
+extern fn native_sdk_gtk_remove_tray(host: *GtkHost) void;
 extern fn native_sdk_gtk_set_shortcuts(host: *GtkHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, window_flags: c_int, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_gtk_create_window(host: *GtkHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, window_flags: c_int, min_width: f64, min_height: f64, popup_parent_id: u64) c_int;
+extern fn native_sdk_gtk_update_popup_window(host: *GtkHost, window_id: u64, width: f64, height: f64, anchor_x: f64, anchor_y: f64) c_int;
 extern fn native_sdk_gtk_start_window_drag(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_set_window_drag_regions(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
+extern fn native_sdk_gtk_show_context_menu(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const GtkContextMenuItem, count: usize) c_int;
 extern fn native_sdk_gtk_window_chrome(host: *GtkHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
 extern fn native_sdk_gtk_start_timer(host: *GtkHost, timer_id: u64, interval_ns: u64, repeats: c_int) void;
 extern fn native_sdk_gtk_cancel_timer(host: *GtkHost, timer_id: u64) void;
@@ -274,6 +291,7 @@ pub const LinuxPlatform = struct {
                 .create_window_fn = createWindow,
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
+                .update_popup_window_fn = updatePopupWindow,
                 .minimize_window_fn = minimizeWindow,
                 .start_window_drag_fn = startWindowDrag,
                 .set_window_drag_regions_fn = setWindowDragRegions,
@@ -286,6 +304,7 @@ pub const LinuxPlatform = struct {
                 .close_view_fn = closeView,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                .show_context_menu_fn = showContextMenu,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -359,7 +378,7 @@ pub const LinuxPlatform = struct {
             // a host whose plugin set lacks it answers false and the
             // deck's glass rests honestly instead of dancing on fakes.
             .audio_spectrum => self.web_engine == .system and audioSpectrumAvailable(self.host),
-            .tray => false,
+            .tray => self.web_engine == .system,
             // Native scroll drivers, native context menus, and app-owned
             // view-surface adoption are macOS-only today; GTK keeps the
             // engine's wheel physics and has no popover-menu presenter
@@ -420,7 +439,8 @@ const RunState = struct {
     fn emit(self: *RunState, event: platform_mod.Event) void {
         const handler = self.handler orelse return;
         const context = self.handler_context orelse return;
-        handler(context, event) catch {
+        handler(context, event) catch |err| {
+            std.debug.print("platform callback failed: {s} (event {s})\n", .{ @errorName(err), @tagName(event) });
             self.failed = true;
             if (comptime @import("builtin").is_test) return;
             if (self.self) |linux| native_sdk_gtk_stop(linux.host);
@@ -503,7 +523,7 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .backend = .software,
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,
-            .alpha_mode = .@"opaque",
+            .alpha_mode = .premultiplied,
             .color_space = .srgb,
             .vsync = true,
             .status = .ready,
@@ -515,6 +535,13 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .scale_factor = @floatCast(event.scale),
         } }),
         .gpu_surface_input => state.emit(.{ .gpu_surface_input = gpuSurfaceInputEventFromGtkEvent(event) }),
+        .context_menu_action => state.emit(.{ .context_menu_action = .{
+            .window_id = event.window_id,
+            .view_label = event.view_label[0..event.view_label_len],
+            .token = event.widget_id,
+            .item_id = event.menu_item_id,
+        } }),
+        .tray_action => state.emit(.{ .tray_action = event.menu_item_id }),
         .wake => state.emit(.wake),
         .timer => state.emit(.{ .timer = .{
             .id = event.timer_id,
@@ -730,7 +757,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), windowFlagsInt(options), minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
+    if (native_sdk_gtk_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), windowFlagsInt(options), minSizeFloor(options.min_width), minSizeFloor(options.min_height), options.popup_parent_id) == 0) return error.CreateFailed;
     return .{
         .id = options.id,
         .label = options.label,
@@ -750,6 +777,11 @@ fn focusWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_gtk_close_window(self.host, window_id) == 0) return error.CloseFailed;
+}
+
+fn updatePopupWindow(context: ?*anyopaque, window_id: platform_mod.WindowId, width: f64, height: f64, anchor_x: f64, anchor_y: f64) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_gtk_update_popup_window(self.host, window_id, width, height, anchor_x, anchor_y) == 0) return error.UpdateFailed;
 }
 
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
@@ -787,6 +819,32 @@ fn setWindowDragRegions(context: ?*anyopaque, window_id: platform_mod.WindowId, 
         exclusions[index] = if (region.exclusion) 1 else 0;
     }
     if (native_sdk_gtk_set_window_drag_regions(self.host, window_id, label.ptr, label.len, &rects, &exclusions, regions.len) == 0) return error.ViewNotFound;
+}
+
+fn showContextMenu(context: ?*anyopaque, request: platform_mod.ContextMenuRequest) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    var items: [platform_mod.max_context_menu_items]GtkContextMenuItem = undefined;
+    const count = @min(request.items.len, items.len);
+    for (request.items[0..count], 0..) |item, index| {
+        items[index] = .{
+            .item_id = item.id,
+            .label = item.label.ptr,
+            .label_len = item.label.len,
+            .enabled = if (item.enabled) 1 else 0,
+            .separator = if (item.separator) 1 else 0,
+        };
+    }
+    if (native_sdk_gtk_show_context_menu(
+        self.host,
+        request.window_id,
+        request.view_label.ptr,
+        request.view_label.len,
+        request.point.x,
+        request.point.y,
+        request.token,
+        &items,
+        count,
+    ) == 0) return error.WindowNotFound;
 }
 
 /// Chrome overlay geometry for hidden-titlebar windows: the header-bar
@@ -1209,20 +1267,34 @@ fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
 }
 
 fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
-    _ = context;
-    _ = options;
-    return error.UnsupportedService;
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (native_sdk_gtk_create_tray(self.host, options.icon_path.ptr, options.icon_path.len, options.tooltip.ptr, options.tooltip.len) == 0) return error.UnsupportedService;
+    if (options.items.len > 0) try updateTrayMenu(context, options.items);
 }
 
 fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {
-    _ = context;
-    _ = items;
-    return error.UnsupportedService;
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const count = @min(items.len, platform_mod.max_tray_items);
+    var ids: [platform_mod.max_tray_items]u32 = undefined;
+    var labels: [platform_mod.max_tray_items][*]const u8 = undefined;
+    var label_lens: [platform_mod.max_tray_items]usize = undefined;
+    var separators: [platform_mod.max_tray_items]c_int = undefined;
+    var enabled_flags: [platform_mod.max_tray_items]c_int = undefined;
+    for (items[0..count], 0..) |item, index| {
+        ids[index] = item.id;
+        labels[index] = item.label.ptr;
+        label_lens[index] = item.label.len;
+        separators[index] = if (item.separator) 1 else 0;
+        enabled_flags[index] = if (item.enabled) 1 else 0;
+    }
+    if (native_sdk_gtk_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, count) == 0) return error.UnsupportedService;
 }
 
 fn removeTray(context: ?*anyopaque) anyerror!void {
-    _ = context;
-    return error.UnsupportedService;
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_gtk_remove_tray(self.host);
 }
 
 fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {

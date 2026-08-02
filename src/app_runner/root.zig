@@ -576,6 +576,11 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .js_window_api = options.js_window_api,
         .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
+        // GTK's software presenter retains the last pixels for every
+        // surface. Keep the runtime's keyed mirror too so a model Msg
+        // whose display list is unchanged plans a skipped frame instead
+        // of rasterizing and uploading the whole canvas again.
+        .pixel_present_retained_baseline = true,
         .security = options.security,
         .menus = options.menus,
         .shortcuts = shortcuts,
