@@ -288,6 +288,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// `resizable` (see the manifest window fields of the same
             /// names).
             floating: bool = false,
+            fullscreen_overlay: bool = false,
             transparent: bool = false,
             click_through: bool = false,
             /// Content min-size floor the WINDOW enforces (macOS
@@ -1900,6 +1901,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .y = descriptor.y,
                 .resizable = descriptor.resizable,
                 .floating = descriptor.floating,
+                .fullscreen_overlay = descriptor.fullscreen_overlay,
                 .transparent = descriptor.transparent,
                 .click_through = descriptor.click_through,
                 .titlebar = descriptor.titlebar,

@@ -6463,7 +6463,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     // application's full-screen Space. Companion apps instead run as
     // accessory applications; their ordinary settings windows can still
     // activate normally when explicitly opened.
-    [NSApp setActivationPolicy:(windowFlags & 1)
+    [NSApp setActivationPolicy:(windowFlags & 8)
         ? NSApplicationActivationPolicyAccessory
         : NSApplicationActivationPolicyRegular];
     // App delegate from init, not from runWithCallback:. A launch
@@ -6558,11 +6558,12 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         }
     }
     const BOOL floating = (windowFlags & 1) != 0;
-    if (floating) {
+    const BOOL fullscreenOverlay = (windowFlags & 8) != 0;
+    if (fullscreenOverlay) {
         styleMask |= NSWindowStyleMaskNonactivatingPanel;
     }
     NSWindow *window;
-    if (floating) {
+    if (fullscreenOverlay) {
         window = [[NativeSdkCompanionPanel alloc] initWithContentRect:rect
                                                             styleMask:styleMask
                                                               backing:NSBackingStoreBuffered
@@ -6587,11 +6588,14 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     // shutdown, which is why this stayed hidden until windows_fn).
     window.releasedWhenClosed = NO;
     // Companion-window chrome flags (bit 0 floating, bit 1 transparent,
-    // bit 2 click-through), fixed at create time like the titlebar
+    // bit 2 click-through, bit 3 fullscreen overlay), fixed at create time like the titlebar
     // style. Transparency drops the window shadow too: a shadow is
     // computed from the opaque frame and paints a ghost rectangle
     // behind non-rectangular content.
     if (floating) {
+        window.level = NSFloatingWindowLevel;
+    }
+    if (fullscreenOverlay) {
         NativeSdkCompanionPanel *panel = (NativeSdkCompanionPanel *)window;
         panel.floatingPanel = YES;
         panel.hidesOnDeactivate = NO;
@@ -6692,7 +6696,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         self.delegate = delegate;
         self.windowLabel = label.length > 0 ? label : @"main";
     } else if (showPolicy != 1) {
-        if (floating) {
+        if (fullscreenOverlay) {
             [window orderFrontRegardless];
         } else {
             [window makeKeyAndOrderFront:nil];

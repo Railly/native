@@ -1042,13 +1042,14 @@ fn emitWindowEvent(context: ?*anyopaque, window_id: platform_mod.WindowId, name:
 }
 
 /// Window-chrome flags packed for the C seam: bit 0 floating, bit 1
-/// transparent, bit 2 click-through. One int keeps the create
+/// transparent, bit 2 click-through, bit 3 fullscreen overlay. One int keeps the create
 /// signatures from growing a parameter per flag.
 fn windowFlagsInt(options: anytype) c_int {
     var flags: c_int = 0;
     if (options.floating) flags |= 1;
     if (options.transparent) flags |= 2;
     if (options.click_through) flags |= 4;
+    if (options.fullscreen_overlay) flags |= 8;
     return flags;
 }
 
@@ -2323,12 +2324,14 @@ test "mac gpu surface input maps pinch phases and carries the magnification delt
 }
 
 test "mac window flags pack companion chrome bits" {
-    const Flags = struct { floating: bool = false, transparent: bool = false, click_through: bool = false };
+    const Flags = struct { floating: bool = false, transparent: bool = false, click_through: bool = false, fullscreen_overlay: bool = false };
     try std.testing.expectEqual(@as(c_int, 0), windowFlagsInt(Flags{}));
     try std.testing.expectEqual(@as(c_int, 1), windowFlagsInt(Flags{ .floating = true }));
     try std.testing.expectEqual(@as(c_int, 2), windowFlagsInt(Flags{ .transparent = true }));
     try std.testing.expectEqual(@as(c_int, 4), windowFlagsInt(Flags{ .click_through = true }));
     try std.testing.expectEqual(@as(c_int, 7), windowFlagsInt(Flags{ .floating = true, .transparent = true, .click_through = true }));
+    try std.testing.expectEqual(@as(c_int, 8), windowFlagsInt(Flags{ .fullscreen_overlay = true }));
+    try std.testing.expectEqual(@as(c_int, 15), windowFlagsInt(Flags{ .floating = true, .transparent = true, .click_through = true, .fullscreen_overlay = true }));
 }
 
 test "mac appearance event maps color scheme" {

@@ -75,6 +75,7 @@ fn shellWindowFrom(comptime window: anytype) types.ShellWindow {
     if (@hasField(@TypeOf(window), "y")) out.y = window.y;
     if (@hasField(@TypeOf(window), "resizable")) out.resizable = window.resizable;
     if (@hasField(@TypeOf(window), "floating")) out.floating = window.floating;
+    if (@hasField(@TypeOf(window), "fullscreen_overlay")) out.fullscreen_overlay = window.fullscreen_overlay;
     if (@hasField(@TypeOf(window), "transparent")) out.transparent = window.transparent;
     if (@hasField(@TypeOf(window), "click_through")) out.click_through = window.click_through;
     if (@hasField(@TypeOf(window), "restore_state")) out.restore_state = window.restore_state;

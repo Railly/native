@@ -327,6 +327,10 @@ pub const Window = struct {
     /// Keep the window above normal windows on every desktop (macOS
     /// NSFloatingWindowLevel; other hosts stage their equivalent).
     floating: bool = false,
+    /// Join every Space and another app's full-screen Space. This is
+    /// deliberately separate from `floating`: always-on-top does not
+    /// imply full-screen overlay semantics.
+    fullscreen_overlay: bool = false,
     /// Transparent surface: clears to alpha 0 so the OS composites the
     /// app's pixels straight over the desktop.
     transparent: bool = false,
@@ -462,6 +466,8 @@ pub const ShellWindow = struct {
     /// Keep the window above normal windows on every desktop (macOS
     /// NSFloatingWindowLevel; other hosts stage their equivalent).
     floating: bool = false,
+    /// Explicit opt-in for cross-Space/full-screen companion behavior.
+    fullscreen_overlay: bool = false,
     /// Transparent surface: clears to alpha 0 so the OS composites the
     /// app's pixels straight over the desktop.
     transparent: bool = false,
