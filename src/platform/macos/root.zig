@@ -828,6 +828,16 @@ pub const MacPlatform = struct {
             // reports honestly unsupported rather than half-implementing
             // a second player.
             .video_playback => self.web_engine == .system,
+            // Two-track recording lives in the AppKit host: an
+            // AVAudioEngine input tap for the mic, a ScreenCaptureKit
+            // audio stream for the system mix, each writing its own
+            // AVAudioFile. Both frameworks are in-box, so the report
+            // rides the same engine gate as the player; the CEF host
+            // stubs the C ABI and reports honestly unsupported. A live
+            // probe would have to ask TCC, and TCC only answers by
+            // prompting — so support here means "the host implements
+            // it", and a denied grant surfaces as a `.failed` event.
+            .audio_capture => self.web_engine == .system,
         };
     }
 

@@ -548,6 +548,14 @@ pub const WindowsPlatform = struct {
             // app that skips the capability check still learns exactly
             // what is missing.
             .video_playback => false,
+            // Two-track audio recording (mic plus system mix) is
+            // macOS-only today, like the scroll drivers above. WASAPI
+            // has the pieces — a capture client for the mic and
+            // device-wide loopback for the mix — but the Win32 host
+            // implements neither, so the honest answer is false and the
+            // service verbs stay absent: `error.UnsupportedService`,
+            // not half a recording.
+            .audio_capture => false,
         };
     }
 

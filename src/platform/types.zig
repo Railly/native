@@ -180,6 +180,21 @@ pub const PlatformFeature = enum {
     /// verbs with a teaching and `error.UnsupportedService` — named
     /// unsupported, not half-implemented — and report false here.
     video_playback,
+    /// Two-track audio recording: the default input device and the
+    /// system output mix captured SEPARATELY into two mono WAV files
+    /// (macOS: an AVAudioEngine input tap plus a ScreenCaptureKit audio
+    /// stream; the null platform: a deterministic fake). macOS-only
+    /// today, like `view_surface_adoption` — Windows (WASAPI loopback)
+    /// and Linux (PipeWire) have the OS capability but no host
+    /// implementation, so they report false and answer
+    /// `error.UnsupportedService` rather than half-recording.
+    ///
+    /// The system track is the one capability here that reaches OUTSIDE
+    /// the app: it records whatever the machine is playing, so macOS
+    /// gates it behind the Screen Recording TCC grant, and the mic track
+    /// behind the Microphone grant. A refusal is one `.failed` event
+    /// with `.permission_denied`, never a crash.
+    audio_capture,
 };
 
 pub const WebViewSourceKind = enum {
@@ -1456,6 +1471,62 @@ pub const AudioLoadResolution = enum(u8) {
     stream,
 };
 
+/// Longest capture destination path `audioCaptureStart` accepts, per
+/// track; longer strings are rejected with
+/// `error.AudioCapturePathTooLarge` before the platform is asked.
+pub const max_audio_capture_path_bytes: usize = 1024;
+
+/// How the platform's audio recorder reports back. `started` answers a
+/// successful `audioCaptureStart` once BOTH tracks are actually running
+/// (the host resolved the paths and opened the files); `level` ticks at
+/// a coarse ~10 Hz while capturing, carrying peak meters for UI only;
+/// `stopped` fires exactly once per capture with the byte and duration
+/// totals the host actually wrote; `failed` reports a permission
+/// refusal, a busy device, or a full disk — always an event, never a
+/// crash and never silence.
+///
+/// PCM never rides these events. The host owns the file writes end to
+/// end (two `AVAudioFile`s) and only the resolved paths cross the ABI,
+/// exactly like the audio track cache: an hour of 48 kHz mono is ~170 MB
+/// per track, and the effects channel is line-oriented.
+pub const AudioCaptureEventKind = enum(u8) {
+    started,
+    level,
+    stopped,
+    failed,
+};
+
+/// Why a capture ended before (or instead of) delivering audio. Names
+/// follow `EffectExitReason`'s discipline: each value is a distinct
+/// remedy, not a generic error bucket. `permission_denied` is the TCC
+/// refusal (microphone or Screen Recording), the one an app can resolve
+/// by sending the user to System Settings; `device_busy` is an input
+/// device another process holds exclusively; `disk_full` is a write that
+/// could not land; `unsupported` is a platform or OS version without the
+/// capability at all.
+pub const AudioCaptureFailureReason = enum(u8) {
+    permission_denied,
+    device_busy,
+    disk_full,
+    unsupported,
+};
+
+/// One report from the platform audio recorder. `mic_level` and
+/// `system_level` are peak meters on a linear 0..255 scale (0 silence,
+/// 255 full scale), the same plain-bytes discipline as the spectrum
+/// bands — levels for meters, NEVER samples. `bytes_written` and
+/// `duration_ms` carry the host's honest totals on `.stopped` and are
+/// zero on every other kind. `reason` is meaningful only on `.failed`.
+pub const AudioCaptureEvent = struct {
+    key: u64,
+    kind: AudioCaptureEventKind,
+    mic_level: u8 = 0,
+    system_level: u8 = 0,
+    bytes_written: u64 = 0,
+    duration_ms: u64 = 0,
+    reason: AudioCaptureFailureReason = .unsupported,
+};
+
 /// Longest video source string (local path or URL) `videoLoad`/
 /// `videoLoadUrl` accepts; longer strings are rejected with
 /// `error.VideoPathTooLarge` before the platform is asked.
@@ -2262,6 +2333,11 @@ pub const Event = union(enum) {
     /// Video player reports — the same shape, plus the stream's decoded
     /// dimensions on `.loaded`. Pixels never ride here.
     video: VideoEvent,
+    /// Audio recorder reports: the start acknowledgment, coarse level
+    /// meters while capturing, the one stop with the written totals,
+    /// failures. Captured PCM never rides here — the host writes the
+    /// files itself and only paths crossed the ABI to start it.
+    audio_capture: AudioCaptureEvent,
 
     pub fn name(self: Event) []const u8 {
         return switch (self) {
@@ -2291,6 +2367,7 @@ pub const Event = union(enum) {
             .widget_accessibility_action => "widget_accessibility_action",
             .audio => "audio",
             .video => "video",
+            .audio_capture => "audio_capture",
         };
     }
 };
@@ -2465,6 +2542,21 @@ pub const PlatformServices = struct {
     audio_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
     /// Set the player volume, `0.0` (silent) through `1.0` (full).
     audio_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
+    /// Start recording two SEPARATE mono tracks — the default input
+    /// device to `mic_path`, the system output mix to `system_path` —
+    /// under one `key`. The host owns the writing: it opens both files,
+    /// writes WAV frames as they arrive, and closes them on stop. The
+    /// captured PCM never crosses this ABI; only the two destination
+    /// paths do, exactly like the audio track cache's write. Returning
+    /// normally means the request was accepted, NOT that audio flows —
+    /// the `.started` acknowledgment (and every later report) arrives as
+    /// an `.audio_capture` event, including permission refusals.
+    audio_capture_start_fn: ?*const fn (context: ?*anyopaque, key: u64, mic_path: []const u8, system_path: []const u8) anyerror!void = null,
+    /// Stop the capture named by `key`, flushing and closing both files.
+    /// One `.stopped` event follows with the host's byte and duration
+    /// totals. An unknown key is a harmless no-op — the caller may be
+    /// racing a failure that already tore the capture down.
+    audio_capture_stop_fn: ?*const fn (context: ?*anyopaque, key: u64) anyerror!void = null,
     /// Load a local video file into THE app's single video player,
     /// leaving it PAUSED at position zero (transport is a separate
     /// verb, exactly like audio). Loading replaces whatever was loaded
@@ -3068,6 +3160,26 @@ pub const PlatformServices = struct {
         return volume_fn(self.context, volume);
     }
 
+    /// Start a two-track capture (see `audio_capture_start_fn`).
+    /// Platforms without a recorder answer `error.UnsupportedService`;
+    /// empty or oversized paths are rejected here before the platform is
+    /// asked, and the two destinations must differ — one file cannot
+    /// hold two independent mono tracks.
+    pub fn audioCaptureStart(self: PlatformServices, key: u64, mic_path: []const u8, system_path: []const u8) anyerror!void {
+        if (mic_path.len == 0 or system_path.len == 0) return error.InvalidAudioCaptureOptions;
+        if (mic_path.len > max_audio_capture_path_bytes) return error.AudioCapturePathTooLarge;
+        if (system_path.len > max_audio_capture_path_bytes) return error.AudioCapturePathTooLarge;
+        if (std.mem.eql(u8, mic_path, system_path)) return error.InvalidAudioCaptureOptions;
+        const start_fn = self.audio_capture_start_fn orelse return error.UnsupportedService;
+        return start_fn(self.context, key, mic_path, system_path);
+    }
+
+    /// Stop the capture named by `key` (see `audio_capture_stop_fn`).
+    pub fn audioCaptureStop(self: PlatformServices, key: u64) anyerror!void {
+        const stop_fn = self.audio_capture_stop_fn orelse return error.UnsupportedService;
+        return stop_fn(self.context, key);
+    }
+
     /// Load a local video file into the app's single video player (see
     /// `video_load_fn`). Platforms without video playback answer
     /// `error.UnsupportedService`; bad arguments are rejected here
@@ -3317,6 +3429,10 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         // generic floor still probes the verb for embedders that wire a
         // real one.
         .video_playback => services.video_load_fn != null,
+        // Both verbs or nothing: a host that can start a capture but not
+        // stop it would strand an open recorder, so the generic probe
+        // demands the pair.
+        .audio_capture => services.audio_capture_start_fn != null and services.audio_capture_stop_fn != null,
     };
 }
 
