@@ -657,6 +657,58 @@ pub const EffectAudioSource = enum(u8) {
     stream,
 };
 
+/// Longest capture destination path `audioCapture` accepts per track,
+/// mirroring the platform bound. A longer path (or an empty one, or two
+/// identical paths) delivers exactly one `.rejected` capture event Msg.
+pub const max_effect_audio_capture_path_bytes: usize = platform.max_audio_capture_path_bytes;
+
+/// How a capture event Msg came to be. `started` acknowledges that BOTH
+/// tracks are recording; `level` ticks at the platform's coarse ~10 Hz
+/// meter cadence while capturing; `stopped` fires exactly once per
+/// capture with the totals the host actually wrote; `failed` reports a
+/// permission refusal, a busy device, or a full disk; `rejected` reports
+/// a command the effects layer refused before the platform was asked (an
+/// empty or oversized path, both paths equal, or a start while one
+/// capture already runs).
+pub const EffectAudioCaptureEventKind = enum(u8) {
+    started,
+    level,
+    stopped,
+    failed,
+    rejected,
+};
+
+/// Why a capture failed, mirroring the platform vocabulary. Each value
+/// names a distinct remedy: `permission_denied` sends the user to System
+/// Settings (macOS gates the mic behind Microphone and the system track
+/// behind Screen Recording), `device_busy` means another process holds
+/// the input exclusively, `disk_full` means a write could not land, and
+/// `unsupported` means this platform has no recorder at all.
+pub const EffectAudioCaptureFailureReason = enum(u8) {
+    permission_denied,
+    device_busy,
+    disk_full,
+    unsupported,
+};
+
+/// Payload for `on_event` Msg constructors of audio capture effects.
+/// `mic_level` and `system_level` are peak meters on a linear 0..255
+/// scale for UI meters only — levels, NEVER samples: the recorded audio
+/// lands in the two files the request named, written by the platform.
+/// `bytes_written` (both tracks summed) and `duration_ms` are the host's
+/// totals, meaningful on `.stopped`; `reason` is meaningful on `.failed`
+/// and `.rejected`. All fields are plain data — safe to store in the
+/// model, like `EffectAudio`.
+pub const EffectAudioCapture = struct {
+    key: u64,
+    kind: EffectAudioCaptureEventKind,
+    mic_level: u8 = 0,
+    system_level: u8 = 0,
+    bytes_written: u64 = 0,
+    duration_ms: u64 = 0,
+    reason: EffectAudioCaptureFailureReason = .unsupported,
+};
+
 /// Longest video source string (path or url) `loadVideo` accepts,
 /// mirroring the platform bound. Longer strings deliver exactly one
 /// `.rejected` video event Msg.
@@ -1749,6 +1801,16 @@ pub const EffectResultKind = enum(u8) {
     /// opposite of the channel records' inline argument. Exit records
     /// ride `code`/`exit_reason` plus the pty fields.
     pty = 15,
+    /// One audio capture event (`EffectAudioCapture`), journaled
+    /// verbatim at the delivery boundary exactly like `.audio` — the Msg
+    /// source under replay, while the platform's own `.audio_capture`
+    /// events stay inert. The captured AUDIO is never journaled: it
+    /// lives in the two files the request named, on the recording
+    /// machine, and a replay writes none — the record replays the event
+    /// stream, not the recording. Kind codes are append-only and never
+    /// repack; the code value rides the journal, so a change here moves
+    /// the format fingerprint.
+    audio_capture = 16,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -1835,6 +1897,14 @@ pub const EffectResultRecord = struct {
     /// the honest non-determinism (a real FFT of real audio) recorded at
     /// the boundary so replay repaints identical bars.
     audio_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
+    /// `.audio_capture` records: the delivered capture event, verbatim.
+    /// Levels only — the recorded audio never enters the journal.
+    audio_capture_kind: EffectAudioCaptureEventKind = .level,
+    audio_capture_mic_level: u8 = 0,
+    audio_capture_system_level: u8 = 0,
+    audio_capture_bytes_written: u64 = 0,
+    audio_capture_duration_ms: u64 = 0,
+    audio_capture_reason: EffectAudioCaptureFailureReason = .unsupported,
     /// `.image` records: the delivered terminal outcome and the decoded
     /// dimensions (0 unless `.loaded`); the HTTP status rides the
     /// shared `status` field (0 when no exchange occurred — local
@@ -2409,6 +2479,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
+        pub const AudioCaptureMsgFn = *const fn (event: EffectAudioCapture) Msg;
         pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
@@ -2493,6 +2564,18 @@ pub fn Effects(comptime Msg: type) type {
         pub fn audioMsg(comptime tag: std.meta.Tag(Msg)) AudioMsgFn {
             return struct {
                 fn make(event: EffectAudio) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for `on_event` of audio capture:
+        /// `audioCaptureMsg(.capture_event)` builds
+        /// `Msg{ .capture_event = event }` — the variant's payload type
+        /// must be `native_sdk.EffectAudioCapture`.
+        pub fn audioCaptureMsg(comptime tag: std.meta.Tag(Msg)) AudioCaptureMsgFn {
+            return struct {
+                fn make(event: EffectAudioCapture) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
@@ -2798,6 +2881,30 @@ pub fn Effects(comptime Msg: type) type {
             /// `audioMsg`). Without one, playback still runs; the app
             /// just hears nothing back.
             on_event: ?AudioMsgFn = null,
+        };
+
+        pub const AudioCaptureOptions = struct {
+            /// Caller-chosen identity, echoed in every event for this
+            /// capture and named by `stopAudioCapture`. Capture keys are
+            /// their own namespace, like audio and timer keys.
+            key: u64,
+            /// Where the MICROPHONE track is written: one mono WAV from
+            /// the default input device. Copied at call time (the
+            /// caller's buffer may be reused immediately) and bounded by
+            /// `max_effect_audio_capture_path_bytes`. Empty, oversized,
+            /// or equal to `system_path` is rejected with one
+            /// `.rejected` event.
+            mic_path: []const u8 = "",
+            /// Where the SYSTEM AUDIO track is written: one mono WAV of
+            /// the machine's output mix, excluding this app's own
+            /// playback (so recording never captures itself). The same
+            /// bounds and rejection rules as `mic_path`.
+            system_path: []const u8 = "",
+            /// Msg constructor every capture event flows through (see
+            /// `audioCaptureMsg`). Without one, recording still runs;
+            /// the app just hears nothing back — including failures, so
+            /// production code should always set it.
+            on_event: ?AudioCaptureMsgFn = null,
         };
 
         pub const LoadImageOptions = struct {
@@ -3155,6 +3262,62 @@ pub fn Effects(comptime Msg: type) type {
             spectrum_events: u64 = 0,
         };
 
+        /// The single capture channel. One recorder, one active capture
+        /// — the same shape as the audio player, and the same shape the
+        /// macOS host has (one AVAudioEngine tap plus one SCStream). A
+        /// start while one runs is rejected rather than silently
+        /// replacing it: the running capture owns two open files, and
+        /// dropping them mid-session would lose the recording.
+        const AudioCaptureChannel = struct {
+            active: bool = false,
+            fake: bool = false,
+            key: u64 = 0,
+            on_event: ?AudioCaptureMsgFn = null,
+            /// True once the platform acknowledged with `.started` — the
+            /// honest "audio is really flowing", distinct from `active`
+            /// (the request was accepted).
+            started: bool = false,
+            mic_level: u8 = 0,
+            system_level: u8 = 0,
+            /// Lifetime `.level` count for THIS capture — snapshot
+            /// evidence that metering flows. Reset on every new start.
+            level_events: u64 = 0,
+            mic_path_buffer: [max_effect_audio_capture_path_bytes]u8 = undefined,
+            mic_path_len: usize = 0,
+            system_path_buffer: [max_effect_audio_capture_path_bytes]u8 = undefined,
+            system_path_len: usize = 0,
+
+            fn micPath(channel: *const AudioCaptureChannel) []const u8 {
+                return channel.mic_path_buffer[0..channel.mic_path_len];
+            }
+
+            fn systemPath(channel: *const AudioCaptureChannel) []const u8 {
+                return channel.system_path_buffer[0..channel.system_path_len];
+            }
+        };
+
+        /// Capture state the automation snapshot exposes: honest — it
+        /// reports what the platform has told us. `started` false while
+        /// `active` is true means the request is accepted but no
+        /// acknowledgment has arrived (or a grant is pending).
+        pub const AudioCaptureSnapshot = struct {
+            active: bool = false,
+            started: bool = false,
+            key: u64 = 0,
+            mic_level: u8 = 0,
+            system_level: u8 = 0,
+            level_events: u64 = 0,
+        };
+
+        /// A recorded audio capture request, exposed by the fake
+        /// executor for test assertions. The strings borrow the
+        /// channel's storage — valid until the next `audioCapture`.
+        pub const AudioCaptureRequest = struct {
+            key: u64,
+            mic_path: []const u8,
+            system_path: []const u8,
+        };
+
         /// A recorded audio playback request, exposed by the fake
         /// executor for test assertions. The strings borrow the
         /// channel's storage — valid until the next `playAudio`.
@@ -3442,6 +3605,12 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
+            /// The audio entry's shape for the capture channel.
+            /// `resolve` marks fed events (fake executor / replay) whose
+            /// key and handler come from the live channel at delivery;
+            /// rejections and synchronous failures are fully formed at
+            /// enqueue, exactly like `.audio`.
+            audio_capture: struct { event: EffectAudioCapture, capture_fn: ?AudioCaptureMsgFn, resolve: bool },
             /// The audio entry's shape for the video channel, staged
             /// in the non-lossy `pending_videos` (see `PendingVideo`)
             /// and taking this union shape only at drain time.
@@ -3499,6 +3668,10 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
+                    // Same for capture: the next meter tick supersedes
+                    // a lost one, and the terminals carry their totals
+                    // rather than a count of what came before.
+                    .audio_capture => {},
                     // Video events never enter the ring (they stage in
                     // the non-lossy `pending_videos`): a loop-side
                     // `.rejected`/`.failed` is its load's only
@@ -3538,6 +3711,7 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
+                    .audio_capture => 0,
                     .pty => 0,
                     .host => 0,
                     // Never in the ring; see `addDropped`.
@@ -4260,6 +4434,9 @@ pub fn Effects(comptime Msg: type) type {
         /// The single audio playback channel (see `AudioChannel`).
         /// Loop-thread only, like the timer table.
         audio: AudioChannel = .{},
+        /// The single audio capture channel (see
+        /// `AudioCaptureChannel`). Loop-thread only, like the player.
+        audio_capture: AudioCaptureChannel = .{},
         /// The single video playback channel (see `VideoChannel`).
         video: VideoChannel = .{},
         /// Monotonic per-load video token mint (see
@@ -7757,6 +7934,86 @@ pub fn Effects(comptime Msg: type) type {
             services.audioStop() catch {};
         }
 
+        /// Start recording TWO separate mono WAV tracks — the default
+        /// input device to `mic_path`, the system output mix to
+        /// `system_path` — under one `key`. The platform writes both
+        /// files itself; the effects channel carries only commands and
+        /// small events, never audio. That is the whole design: an hour
+        /// of 48 kHz mono is ~170 MB per track, so PCM crossing this
+        /// channel would be a bug, not a feature. Levels for meters
+        /// arrive as `.level` events at a coarse ~10 Hz.
+        ///
+        /// TEA all the way down: the `.started` acknowledgment (both
+        /// tracks really running), meter ticks, the one `.stopped` with
+        /// the written totals, and every failure arrive as `on_event`
+        /// Msgs through the ordinary update path. Never fails from the
+        /// caller's view: an empty or oversized path, two identical
+        /// paths, or a start while a capture already runs delivers one
+        /// `.rejected` event; a denied TCC grant (macOS gates the mic
+        /// behind Microphone and the system track behind Screen
+        /// Recording), a busy device, or a platform without a recorder
+        /// delivers one `.failed` — never a crash, never silence.
+        ///
+        /// One recorder, one capture: the key is its own namespace (like
+        /// audio and timer keys) and consumes no `max_effects` slots.
+        pub fn audioCapture(self: *Self, options: AudioCaptureOptions) void {
+            const rejected = options.mic_path.len == 0 or
+                options.system_path.len == 0 or
+                options.mic_path.len > max_effect_audio_capture_path_bytes or
+                options.system_path.len > max_effect_audio_capture_path_bytes or
+                // Two tracks cannot share one file, and a running
+                // capture owns two open files — replacing it silently
+                // would lose the recording in flight.
+                std.mem.eql(u8, options.mic_path, options.system_path) or
+                self.audio_capture.active;
+            if (rejected) {
+                self.deliverLoopAudioCapture(
+                    .{ .key = options.key, .kind = .rejected },
+                    options.on_event,
+                );
+                return;
+            }
+            self.audio_capture = .{
+                .active = true,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .on_event = options.on_event,
+            };
+            @memcpy(self.audio_capture.mic_path_buffer[0..options.mic_path.len], options.mic_path);
+            self.audio_capture.mic_path_len = options.mic_path.len;
+            @memcpy(self.audio_capture.system_path_buffer[0..options.system_path.len], options.system_path);
+            self.audio_capture.system_path_len = options.system_path.len;
+            if (self.audio_capture.fake) return;
+            const services = self.services orelse return self.failAudioCaptureChannel(.unsupported);
+            services.audioCaptureStart(options.key, options.mic_path, options.system_path) catch |err| {
+                return self.failAudioCaptureChannel(switch (err) {
+                    error.UnsupportedService => .unsupported,
+                    // The platform refused the request itself. Anything
+                    // else at this seam is a device the host could not
+                    // open — the honest reading of a synchronous refusal
+                    // from a recorder that just validated its arguments.
+                    else => .device_busy,
+                });
+            };
+        }
+
+        /// Stop the capture named by `key`, flushing and closing both
+        /// files. One `.stopped` event follows with the totals the host
+        /// wrote. A key that names no active capture is a harmless no-op
+        /// (the caller may be racing a failure that already tore it
+        /// down), and no event echoes for it.
+        pub fn stopAudioCapture(self: *Self, key: u64) void {
+            if (!self.audio_capture.active or self.audio_capture.key != key) return;
+            const fake = self.audio_capture.fake;
+            // The channel stays occupied until the platform's `.stopped`
+            // resolves it: the host is still flushing two files, and its
+            // totals are the honest end of this capture.
+            self.audio_capture.active = false;
+            if (fake) return;
+            const services = self.services orelse return;
+            services.audioCaptureStop(key) catch {};
+        }
+
         /// Jump the current playback to `position_ms` (the platform
         /// clamps to the duration). Idle channels no-op; no event echoes
         /// — the next position tick reports from the new position.
@@ -8997,6 +9254,30 @@ pub fn Effects(comptime Msg: type) type {
                                 .audio_playing = event.playing,
                                 .audio_buffering = event.buffering,
                                 .audio_bands = event.bands,
+                            });
+                            return event_fn(event);
+                        },
+                        .audio_capture => |entry| {
+                            var event = entry.event;
+                            var capture_fn = entry.capture_fn;
+                            if (entry.resolve) {
+                                // Fed events resolve against the live
+                                // channel exactly like platform events.
+                                // Capture the handler first — a
+                                // `.stopped`/`.failed` apply resets it.
+                                capture_fn = self.audio_capture.on_event;
+                                event = self.applyAudioCaptureEvent(event) orelse continue;
+                            }
+                            const event_fn = capture_fn orelse continue;
+                            self.journalNote(.{
+                                .kind = .audio_capture,
+                                .key = event.key,
+                                .audio_capture_kind = event.kind,
+                                .audio_capture_mic_level = event.mic_level,
+                                .audio_capture_system_level = event.system_level,
+                                .audio_capture_bytes_written = event.bytes_written,
+                                .audio_capture_duration_ms = event.duration_ms,
+                                .audio_capture_reason = event.reason,
                             });
                             return event_fn(event);
                         },
@@ -11281,6 +11562,131 @@ pub fn Effects(comptime Msg: type) type {
         fn deliverLoopAudio(self: *Self, event: EffectAudio, audio_fn: ?AudioMsgFn) void {
             if (audio_fn == null) return;
             self.deliverPending(.{ .audio = .{ .event = event, .audio_fn = audio_fn, .resolve = false } });
+        }
+
+        /// Tear down the capture channel and report one `.failed` with
+        /// the reason. Nothing was recorded that the app can use, so the
+        /// channel goes fully idle — a later `.stopped` straggler from a
+        /// host that was already dying is swallowed as unattributable.
+        fn failAudioCaptureChannel(self: *Self, reason: EffectAudioCaptureFailureReason) void {
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            self.audio_capture = .{};
+            self.deliverLoopAudioCapture(.{ .key = key, .kind = .failed, .reason = reason }, on_event);
+        }
+
+        /// Queue a capture event Msg produced on the loop thread
+        /// (rejections and synchronous failures) for the next drain.
+        fn deliverLoopAudioCapture(self: *Self, event: EffectAudioCapture, capture_fn: ?AudioCaptureMsgFn) void {
+            if (capture_fn == null) return;
+            self.deliverPending(.{ .audio_capture = .{ .event = event, .capture_fn = capture_fn, .resolve = false } });
+        }
+
+        /// Update the capture channel mirrors from one event and stamp
+        /// the channel's key into it. Null when the channel is idle (a
+        /// platform straggler after a failure is swallowed rather than
+        /// misattributed) or when the event names a different capture.
+        /// `.started` marks the channel really running; `.level` moves
+        /// the meters; `.stopped` and `.failed` release the channel —
+        /// nothing is left to record.
+        fn applyAudioCaptureEvent(self: *Self, event: EffectAudioCapture) ?EffectAudioCapture {
+            // A `.stopped` resolves a channel whose `active` the stop
+            // verb already cleared, so occupancy is the gate here, not
+            // `active`: the channel stays occupied through the host's
+            // flush and only this event ends it.
+            const occupied = self.audio_capture.active or self.audio_capture.on_event != null or self.audio_capture.started;
+            if (!occupied) return null;
+            if (self.audio_capture.key != event.key) return null;
+            var resolved = event;
+            resolved.key = self.audio_capture.key;
+            switch (event.kind) {
+                .started => self.audio_capture.started = true,
+                .level => {
+                    self.audio_capture.mic_level = event.mic_level;
+                    self.audio_capture.system_level = event.system_level;
+                    self.audio_capture.level_events += 1;
+                },
+                .stopped, .failed, .rejected => self.audio_capture = .{},
+            }
+            return resolved;
+        }
+
+        /// Route a platform capture event back into an `on_event` Msg,
+        /// updating the channel mirrors on the way. Null when the
+        /// channel is idle or has no handler. Loop-thread only; called
+        /// by `UiApp.handleEvent` for `.audio_capture` platform events.
+        pub fn takeAudioCaptureMsg(self: *Self, platform_event: platform.AudioCaptureEvent) ?Msg {
+            // Under replay the journaled effect records are the ONLY Msg
+            // source (fed through `feedAudioCaptureEvent`); the replayed
+            // platform events would double-deliver.
+            if (self.replay) return null;
+            const kind: EffectAudioCaptureEventKind = switch (platform_event.kind) {
+                .started => .started,
+                .level => .level,
+                .stopped => .stopped,
+                .failed => .failed,
+            };
+            const reason: EffectAudioCaptureFailureReason = switch (platform_event.reason) {
+                .permission_denied => .permission_denied,
+                .device_busy => .device_busy,
+                .disk_full => .disk_full,
+                .unsupported => .unsupported,
+            };
+            const capture_fn = self.audio_capture.on_event;
+            const event = self.applyAudioCaptureEvent(.{
+                .key = platform_event.key,
+                .kind = kind,
+                .mic_level = platform_event.mic_level,
+                .system_level = platform_event.system_level,
+                .bytes_written = platform_event.bytes_written,
+                .duration_ms = platform_event.duration_ms,
+                .reason = reason,
+            }) orelse return null;
+            const event_fn = capture_fn orelse return null;
+            self.journalNote(.{
+                .kind = .audio_capture,
+                .key = event.key,
+                .audio_capture_kind = event.kind,
+                .audio_capture_mic_level = event.mic_level,
+                .audio_capture_system_level = event.system_level,
+                .audio_capture_bytes_written = event.bytes_written,
+                .audio_capture_duration_ms = event.duration_ms,
+                .audio_capture_reason = event.reason,
+            });
+            return event_fn(event);
+        }
+
+        /// Feed a capture event as if the platform produced it — the
+        /// fake executor's and session replay's entry point, mirroring
+        /// `feedAudioEvent`.
+        pub fn feedAudioCaptureEvent(self: *Self, event: EffectAudioCapture) !void {
+            const capture_fn = self.audio_capture.on_event;
+            if (capture_fn == null) return;
+            self.deliverPending(.{ .audio_capture = .{ .event = event, .capture_fn = capture_fn, .resolve = true } });
+        }
+
+        /// The capture state mirrors, for the automation snapshot.
+        pub fn audioCaptureSnapshot(self: *const Self) AudioCaptureSnapshot {
+            return .{
+                .active = self.audio_capture.active,
+                .started = self.audio_capture.started,
+                .key = self.audio_capture.key,
+                .mic_level = self.audio_capture.mic_level,
+                .system_level = self.audio_capture.system_level,
+                .level_events = self.audio_capture.level_events,
+            };
+        }
+
+        /// The recorded capture request, for fake-executor assertions.
+        /// Null when no capture is occupying the channel. The strings
+        /// borrow channel storage — valid until the next `audioCapture`.
+        pub fn audioCaptureRequest(self: *const Self) ?AudioCaptureRequest {
+            if (!self.audio_capture.active) return null;
+            return .{
+                .key = self.audio_capture.key,
+                .mic_path = self.audio_capture.micPath(),
+                .system_path = self.audio_capture.systemPath(),
+            };
         }
 
         /// Update the video channel mirrors from one event and stamp

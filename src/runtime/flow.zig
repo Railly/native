@@ -464,6 +464,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .video => |video_event| {
                     try dispatchEvent(self, app, .{ .video = video_event });
                 },
+                .audio_capture => |capture_event| {
+                    try dispatchEvent(self, app, .{ .audio_capture = capture_event });
+                },
                 .wake => {
                     try dispatchEvent(self, app, .effects_wake);
                 },
@@ -533,6 +536,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .effects_wake => {},
                 .audio => {},
                 .video => {},
+                .audio_capture => {},
                 .files_dropped => {},
                 .gpu_surface_frame => {},
                 .gpu_surface_resized => {},

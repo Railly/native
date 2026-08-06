@@ -465,7 +465,13 @@ const EventTag = enum(u8) {
     audio = 24,
     video = 25,
     view_focused = 26,
+    // Merge note: both features independently claimed tag 27. The
+    // hotkey keeps it (it landed on this branch first) and capture
+    // takes 28. These tags are the on-disk wire format, but neither
+    // ordinal had shipped past its own branch, so no recorded journal
+    // owed compatibility to the old value.
     global_hotkey = 27,
+    audio_capture = 28,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -647,6 +653,20 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(video.buffering);
             try cursor.writeInt(u64, video.width);
             try cursor.writeInt(u64, video.height);
+        },
+        // Recorded for stream fidelity like `.audio`. Inert on replay:
+        // the journaled capture EFFECT records are the Msg source, and
+        // a replay writes no files — the recorded paths named a machine
+        // and a moment, not a reproducible artifact.
+        .audio_capture => |capture| {
+            try cursor.writeEnum(EventTag.audio_capture);
+            try cursor.writeInt(u64, capture.key);
+            try cursor.writeEnum(capture.kind);
+            try cursor.writeInt(u8, capture.mic_level);
+            try cursor.writeInt(u8, capture.system_level);
+            try cursor.writeInt(u64, capture.bytes_written);
+            try cursor.writeInt(u64, capture.duration_ms);
+            try cursor.writeEnum(capture.reason);
         },
         .files_dropped => |drop| {
             try cursor.writeEnum(EventTag.files_dropped);
@@ -868,6 +888,19 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
             break :blk .{ .audio = decoded };
         },
+        .audio_capture => blk: {
+            const key = try cursor.readInt(u64);
+            const kind = try cursor.readEnum(platform.AudioCaptureEventKind);
+            break :blk .{ .audio_capture = .{
+                .key = key,
+                .kind = kind,
+                .mic_level = try cursor.readInt(u8),
+                .system_level = try cursor.readInt(u8),
+                .bytes_written = try cursor.readInt(u64),
+                .duration_ms = try cursor.readInt(u64),
+                .reason = try cursor.readEnum(platform.AudioCaptureFailureReason),
+            } };
+        },
         .video => blk: {
             const kind = try cursor.readEnum(platform.VideoEventKind);
             break :blk .{ .video = .{
@@ -1087,6 +1120,15 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u32, record.pty_dropped_writes);
     try cursor.writeBytes(&record.pty_blob_hash);
     try cursor.writeInt(u64, record.pty_blob_len);
+    // Audio capture events — the delivered event, verbatim. Levels and
+    // totals only: the recorded audio lives in the files the request
+    // named and never enters the journal or the blob store.
+    try cursor.writeEnum(record.audio_capture_kind);
+    try cursor.writeInt(u8, record.audio_capture_mic_level);
+    try cursor.writeInt(u8, record.audio_capture_system_level);
+    try cursor.writeInt(u64, record.audio_capture_bytes_written);
+    try cursor.writeInt(u64, record.audio_capture_duration_ms);
+    try cursor.writeEnum(record.audio_capture_reason);
     return buffer[0..cursor.len];
 }
 
@@ -1145,6 +1187,13 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
     record.pty_dropped_writes = try cursor.readInt(u32);
     @memcpy(&record.pty_blob_hash, try cursor.readBytes(record.pty_blob_hash.len));
     record.pty_blob_len = try cursor.readInt(u64);
+    // Audio capture events.
+    record.audio_capture_kind = try cursor.readEnum(runtime_effects.EffectAudioCaptureEventKind);
+    record.audio_capture_mic_level = try cursor.readInt(u8);
+    record.audio_capture_system_level = try cursor.readInt(u8);
+    record.audio_capture_bytes_written = try cursor.readInt(u64);
+    record.audio_capture_duration_ms = try cursor.readInt(u64);
+    record.audio_capture_reason = try cursor.readEnum(runtime_effects.EffectAudioCaptureFailureReason);
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
 }

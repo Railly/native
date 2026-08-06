@@ -8,6 +8,11 @@
  * magnitudes. Both in-box system frameworks — no third-party DSP. */
 #import <MediaToolbox/MediaToolbox.h>
 #import <Accelerate/Accelerate.h>
+/* System-audio capture: ScreenCaptureKit is the only supported way to
+ * read the machine's output mix on modern macOS, and it is the reason
+ * the system track needs the Screen Recording TCC grant. The mic track
+ * rides AVFoundation's AVAudioEngine, already imported above. */
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <WebKit/WebKit.h>
@@ -42,6 +47,13 @@
 #include <string.h>
 
 @class NativeSdkAppKitHost;
+
+/* The SCStream audio output. Kept as its own object (rather than the
+ * host) so the stream holds no strong reference back to the host, and
+ * so the delegate protocol conformance stays scoped to capture. */
+@interface NativeSdkAudioCaptureOutput : NSObject <SCStreamOutput, SCStreamDelegate>
+@property(nonatomic, weak) NativeSdkAppKitHost *host;
+@end
 
 static const NSUInteger NativeSdkMaxChildWebViews = 16;
 static const NSUInteger NativeSdkMaxNativeViews = 32;
@@ -843,6 +855,35 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * when a new load replaces the stream; orphaned (left to finish) when
  * the stream completes naturally. */
 @property(nonatomic, strong) NSURLSessionDownloadTask *audioCacheDownload;
+/* Two-track capture (see the capture section). The engine owns the mic
+ * tap; the SCStream owns the system mix; each track has its own
+ * AVAudioFile, and the host writes both — no PCM ever crosses the C
+ * ABI. `audioCaptureKey` identifies the capture in every report, and
+ * `audioCaptureActive` gates the teardown so a stop and an async
+ * failure cannot both close the files. */
+@property(nonatomic, strong) AVAudioEngine *audioCaptureEngine;
+@property(nonatomic, strong) SCStream *audioCaptureStream;
+@property(nonatomic, strong) id audioCaptureStreamOutput;
+@property(nonatomic, strong) AVAudioFile *audioCaptureMicFile;
+@property(nonatomic, strong) AVAudioFile *audioCaptureSystemFile;
+@property(nonatomic, strong) NSTimer *audioCaptureLevelTimer;
+@property(nonatomic, assign) uint64_t audioCaptureKey;
+@property(nonatomic, assign) BOOL audioCaptureActive;
+/* Set once the first system buffer lands, so STARTED reports only when
+ * audio is really flowing rather than when the request was accepted. */
+@property(nonatomic, assign) BOOL audioCaptureStartedEmitted;
+@property(nonatomic, assign) uint64_t audioCaptureStartNs;
+/* Peak meters for the next LEVEL tick, written by the two capture
+ * callbacks (engine tap thread, SCStream queue) and read by the timer
+ * on the main thread — atomics because those are three threads. */
+@property(nonatomic, assign) _Atomic uint32_t *audioCaptureMicPeak;
+@property(nonatomic, assign) _Atomic uint32_t *audioCaptureSystemPeak;
+/* Bytes written per track, summed into the STOPPED report. */
+@property(nonatomic, assign) _Atomic uint64_t *audioCaptureBytes;
+/* Serializes the two AVAudioFile writers: the engine tap and the
+ * SCStream callback run on different threads and each owns its own
+ * file, but teardown must not race either. */
+@property(nonatomic, strong) dispatch_queue_t audioCaptureQueue;
 /* The app's single video player and its two timers. One player is the
  * whole surface, exactly like audio: a video app shows one stream at a
  * time, and a second concurrent decode would be compositor design the
@@ -1067,6 +1108,12 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (int)audioSeekToMs:(uint64_t)positionMs;
 - (int)audioSetVolume:(double)volume;
 - (void)emitAudioEventOfKind:(int)kind;
+- (int)audioCaptureStartWithKey:(uint64_t)key micPath:(NSString *)micPath systemPath:(NSString *)systemPath;
+- (int)audioCaptureStopWithKey:(uint64_t)key;
+- (void)audioCaptureFailWithReason:(int)reason;
+- (void)audioCaptureTeardown;
+- (void)audioCaptureEmitKind:(int)kind reason:(int)reason;
+- (void)audioCaptureNoteSystemBuffer:(CMSampleBufferRef)sampleBuffer;
 - (void)stopAudioPositionTimer;
 - (void)audioInstallSpectrumTapForItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset;
 - (void)audioTearDownSpectrumTap;
@@ -10471,6 +10518,381 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     return 1;
 }
 
+/* --------------------------------------------------- audio capture
+ *
+ * Two independent mono tracks written as WAV, each by its own
+ * AVAudioFile the host owns:
+ *
+ *   mic    -> AVAudioEngine's inputNode tap (the default input device)
+ *   system -> a ScreenCaptureKit SCStream's audio output (the output
+ *             mix, excluding this process so a recording never
+ *             captures its own playback)
+ *
+ * The captured PCM never crosses the C ABI. Only the two destination
+ * paths travel in, and levels/totals travel back — the same discipline
+ * the audio track cache's write uses. An hour of 48 kHz mono is
+ * ~170 MB per track; the effects channel is line-oriented.
+ *
+ * CLOCK STRATEGY. The two taps have independent clocks: the input
+ * device's ADC clock and the display server's audio mix clock. They are
+ * never sample-locked, and nothing here resamples one onto the other.
+ * Both files simply start when their first buffer arrives and end at
+ * teardown, so a long capture can drift by the difference between the
+ * two clocks — in practice well under a second over an hour, which is
+ * fine for the meeting-recorder case this serves (two tracks a human or
+ * a transcriber aligns by content). An app needing sample-accurate
+ * alignment must not assume it here: that needs a shared timebase and a
+ * resampler, deliberately out of scope. */
+
+/* Peak meters ride 0..255 like the spectrum bands: a linear peak of a
+ * float buffer, scaled and clamped. Levels for meters, never samples. */
+static uint8_t NativeSdkAudioCapturePeakByte(const float *samples, size_t count) {
+    if (!samples || count == 0) return 0;
+    float peak = 0.0f;
+    for (size_t index = 0; index < count; index += 1) {
+        const float magnitude = fabsf(samples[index]);
+        if (magnitude > peak) peak = magnitude;
+    }
+    if (peak > 1.0f) peak = 1.0f;
+    return (uint8_t)lrintf(peak * 255.0f);
+}
+
+- (int)audioCaptureStartWithKey:(uint64_t)key micPath:(NSString *)micPath systemPath:(NSString *)systemPath {
+    /* One recorder, one capture — the Zig side rejects a second start,
+     * and this is the host-side floor behind it. */
+    if (self.audioCaptureActive) return 0;
+    if (micPath.length == 0 || systemPath.length == 0) return 0;
+
+    /* Mono 48 kHz float PCM written as WAV, the same settings for both
+     * tracks so the two files are directly comparable. AVAudioFile
+     * converts from each tap's own processing format on write. */
+    NSDictionary *settings = @{
+        AVFormatIDKey: @(kAudioFormatLinearPCM),
+        AVSampleRateKey: @48000.0,
+        AVNumberOfChannelsKey: @1,
+        AVLinearPCMBitDepthKey: @16,
+        AVLinearPCMIsFloatKey: @NO,
+        AVLinearPCMIsBigEndianKey: @NO,
+        AVLinearPCMIsNonInterleaved: @NO,
+    };
+
+    NSError *error = nil;
+    NSURL *micURL = [NSURL fileURLWithPath:micPath];
+    NSURL *systemURL = [NSURL fileURLWithPath:systemPath];
+    [[NSFileManager defaultManager] createDirectoryAtURL:[micURL URLByDeletingLastPathComponent]
+                             withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:NULL];
+    [[NSFileManager defaultManager] createDirectoryAtURL:[systemURL URLByDeletingLastPathComponent]
+                             withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:NULL];
+
+    AVAudioFile *micFile = [[AVAudioFile alloc] initForWriting:micURL settings:settings error:&error];
+    if (!micFile) return 0;
+    AVAudioFile *systemFile = [[AVAudioFile alloc] initForWriting:systemURL settings:settings error:&error];
+    if (!systemFile) return 0;
+
+    self.audioCaptureMicFile = micFile;
+    self.audioCaptureSystemFile = systemFile;
+    self.audioCaptureKey = key;
+    self.audioCaptureActive = YES;
+    self.audioCaptureStartedEmitted = NO;
+    self.audioCaptureStartNs = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if (!self.audioCaptureQueue) {
+        self.audioCaptureQueue = dispatch_queue_create("dev.native-sdk.audio-capture", DISPATCH_QUEUE_SERIAL);
+    }
+    if (!self.audioCaptureMicPeak) self.audioCaptureMicPeak = calloc(1, sizeof(_Atomic uint32_t));
+    if (!self.audioCaptureSystemPeak) self.audioCaptureSystemPeak = calloc(1, sizeof(_Atomic uint32_t));
+    if (!self.audioCaptureBytes) self.audioCaptureBytes = calloc(1, sizeof(_Atomic uint64_t));
+    atomic_store(self.audioCaptureMicPeak, 0);
+    atomic_store(self.audioCaptureSystemPeak, 0);
+    atomic_store(self.audioCaptureBytes, 0);
+
+    /* --- mic track: the engine's input tap ---
+     *
+     * The tap format comes from the input node itself (the device's
+     * native rate and channel count); AVAudioFile handles the
+     * conversion to the mono 48 kHz file format on write. */
+    AVAudioEngine *engine = [[AVAudioEngine alloc] init];
+    self.audioCaptureEngine = engine;
+    AVAudioInputNode *input = engine.inputNode;
+    AVAudioFormat *inputFormat = [input outputFormatForBus:0];
+    if (inputFormat.sampleRate <= 0 || inputFormat.channelCount == 0) {
+        /* No usable input device — a machine with no microphone, or one
+         * whose input another process holds exclusively. */
+        [self audioCaptureTeardown];
+        return 0;
+    }
+
+    __weak NativeSdkAppKitHost *weakSelf = self;
+    [input installTapOnBus:0 bufferSize:4096 format:inputFormat block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+        (void)when;
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.audioCaptureActive) return;
+        if (buffer.floatChannelData && buffer.frameLength > 0) {
+            atomic_store(strongSelf.audioCaptureMicPeak,
+                         NativeSdkAudioCapturePeakByte(buffer.floatChannelData[0], buffer.frameLength));
+        }
+        /* Writes hop to the capture queue: the tap runs on a realtime
+         * audio thread, and file IO must never block it. The engine
+         * REUSES its tap buffer as soon as this block returns, so the
+         * frames are copied into a private buffer first — handing the
+         * engine's own buffer to an async write silently truncates the
+         * track (the writer races the next callback overwriting it). */
+        AVAudioPCMBuffer *owned = [[AVAudioPCMBuffer alloc] initWithPCMFormat:buffer.format
+                                                               frameCapacity:buffer.frameLength];
+        if (!owned) return;
+        owned.frameLength = buffer.frameLength;
+        const AudioBufferList *source = buffer.audioBufferList;
+        AudioBufferList *destination = owned.mutableAudioBufferList;
+        for (UInt32 index = 0; index < source->mNumberBuffers && index < destination->mNumberBuffers; index += 1) {
+            const UInt32 bytes = source->mBuffers[index].mDataByteSize;
+            if (!source->mBuffers[index].mData || !destination->mBuffers[index].mData) continue;
+            memcpy(destination->mBuffers[index].mData, source->mBuffers[index].mData, bytes);
+            destination->mBuffers[index].mDataByteSize = bytes;
+        }
+        dispatch_async(strongSelf.audioCaptureQueue, ^{
+            AVAudioFile *file = strongSelf.audioCaptureMicFile;
+            if (!file) return;
+            NSError *writeError = nil;
+            if (![file writeFromBuffer:owned error:&writeError]) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (!strongSelf.audioCaptureActive) return;
+                    [strongSelf audioCaptureFailWithReason:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DISK_FULL];
+                });
+                return;
+            }
+            atomic_fetch_add(strongSelf.audioCaptureBytes,
+                             (uint64_t)owned.frameLength * 2ull);
+        });
+    }];
+
+    NSError *engineError = nil;
+    if (![engine startAndReturnError:&engineError]) {
+        /* The engine refuses to start when the Microphone grant is
+         * denied — the TCC refusal, reported as such rather than as a
+         * generic device error. */
+        [self audioCaptureTeardown];
+        [self audioCaptureEmitKind:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_FAILED
+                            reason:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_PERMISSION_DENIED];
+        return 1;
+    }
+
+    /* --- system track: the ScreenCaptureKit audio stream ---
+     *
+     * SCShareableContent is asynchronous and is also where a missing
+     * Screen Recording grant surfaces (SCStreamErrorUserDeclined), so
+     * the whole system-track setup lands in its completion handler. The
+     * mic track is already running by then; a system-track failure
+     * fails the whole capture rather than silently delivering one. */
+    NativeSdkAudioCaptureOutput *output = [[NativeSdkAudioCaptureOutput alloc] init];
+    output.host = self;
+    self.audioCaptureStreamOutput = output;
+
+    [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *contentError) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NativeSdkAppKitHost *strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.audioCaptureActive) return;
+            if (contentError || content.displays.count == 0) {
+                const int reason = (contentError && contentError.code == SCStreamErrorUserDeclined)
+                    ? NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_PERMISSION_DENIED
+                    : NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DEVICE_BUSY;
+                [strongSelf audioCaptureFailWithReason:reason];
+                return;
+            }
+
+            SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:content.displays.firstObject
+                                                             excludingWindows:@[]];
+            SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
+            configuration.capturesAudio = YES;
+            configuration.sampleRate = 48000;
+            configuration.channelCount = 1;
+            /* Never record our own playback: a recorder that captures
+             * its own output feeds back into the session. */
+            configuration.excludesCurrentProcessAudio = YES;
+            /* Video frames are not wanted, but SCStream always produces
+             * them; the smallest legal surface keeps the cost nominal
+             * and nothing consumes the screen output. */
+            configuration.width = 2;
+            configuration.height = 2;
+            configuration.minimumFrameInterval = CMTimeMake(1, 1);
+
+            SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:configuration delegate:output];
+            NSError *addError = nil;
+            if (![stream addStreamOutput:output
+                                    type:SCStreamOutputTypeAudio
+                      sampleHandlerQueue:strongSelf.audioCaptureQueue
+                                   error:&addError]) {
+                [strongSelf audioCaptureFailWithReason:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DEVICE_BUSY];
+                return;
+            }
+            strongSelf.audioCaptureStream = stream;
+            [stream startCaptureWithCompletionHandler:^(NSError *startError) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NativeSdkAppKitHost *innerSelf = weakSelf;
+                    if (!innerSelf || !innerSelf.audioCaptureActive) return;
+                    if (startError) {
+                        const int reason = (startError.code == SCStreamErrorUserDeclined)
+                            ? NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_PERMISSION_DENIED
+                            : NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DEVICE_BUSY;
+                        [innerSelf audioCaptureFailWithReason:reason];
+                        return;
+                    }
+                    /* Both tracks are running: the honest STARTED. */
+                    if (!innerSelf.audioCaptureStartedEmitted) {
+                        innerSelf.audioCaptureStartedEmitted = YES;
+                        [innerSelf audioCaptureEmitKind:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_STARTED reason:0];
+                    }
+                });
+            }];
+        });
+    }];
+
+    /* Meters at ~10 Hz — a readout for UI, not a frame clock. */
+    self.audioCaptureLevelTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                                  repeats:YES
+                                                                    block:^(NSTimer *timer) {
+        (void)timer;
+        NativeSdkAppKitHost *strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.audioCaptureActive) return;
+        if (!strongSelf.audioCaptureStartedEmitted) return;
+        [strongSelf audioCaptureEmitKind:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_LEVEL reason:0];
+    }];
+    return 1;
+}
+
+- (int)audioCaptureStopWithKey:(uint64_t)key {
+    if (!self.audioCaptureActive || self.audioCaptureKey != key) return 0;
+    const uint64_t elapsed_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC) - self.audioCaptureStartNs;
+    const uint64_t bytes = self.audioCaptureBytes ? atomic_load(self.audioCaptureBytes) : 0;
+    [self audioCaptureTeardown];
+    native_sdk_appkit_event_t event = {
+        .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE,
+        .audio_capture_kind = NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_STOPPED,
+        .audio_capture_key = key,
+        .audio_capture_bytes_written = bytes,
+        .audio_capture_duration_ms = elapsed_ns / 1000000ull,
+    };
+    [self emitEvent:event];
+    return 1;
+}
+
+/* Tear down and report one FAILED. Nothing usable was produced, so the
+ * files close where they are and the channel goes idle. */
+- (void)audioCaptureFailWithReason:(int)reason {
+    const uint64_t key = self.audioCaptureKey;
+    [self audioCaptureTeardown];
+    native_sdk_appkit_event_t event = {
+        .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE,
+        .audio_capture_kind = NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_FAILED,
+        .audio_capture_key = key,
+        .audio_capture_reason = reason,
+    };
+    [self emitEvent:event];
+}
+
+/* Close both tracks and release every capture resource. Idempotent: a
+ * stop racing an async failure must not double-close the files. The
+ * files are released on the capture queue so an in-flight write
+ * finishes first. */
+- (void)audioCaptureTeardown {
+    self.audioCaptureActive = NO;
+    self.audioCaptureStartedEmitted = NO;
+    [self.audioCaptureLevelTimer invalidate];
+    self.audioCaptureLevelTimer = nil;
+
+    AVAudioEngine *engine = self.audioCaptureEngine;
+    if (engine) {
+        [engine.inputNode removeTapOnBus:0];
+        [engine stop];
+    }
+    self.audioCaptureEngine = nil;
+
+    SCStream *stream = self.audioCaptureStream;
+    if (stream) {
+        [stream stopCaptureWithCompletionHandler:^(NSError *error) { (void)error; }];
+    }
+    self.audioCaptureStream = nil;
+    self.audioCaptureStreamOutput = nil;
+
+    if (self.audioCaptureQueue) {
+        dispatch_sync(self.audioCaptureQueue, ^{
+            /* AVAudioFile flushes and closes the WAV header on
+             * dealloc; dropping the references here, after every queued
+             * write has run, is what makes both files playable. */
+            self.audioCaptureMicFile = nil;
+            self.audioCaptureSystemFile = nil;
+        });
+    } else {
+        self.audioCaptureMicFile = nil;
+        self.audioCaptureSystemFile = nil;
+    }
+}
+
+- (void)audioCaptureEmitKind:(int)kind reason:(int)reason {
+    native_sdk_appkit_event_t event = {
+        .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE,
+        .audio_capture_kind = kind,
+        .audio_capture_key = self.audioCaptureKey,
+        .audio_capture_reason = reason,
+    };
+    if (kind == NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_LEVEL) {
+        event.audio_capture_mic_level =
+            (uint8_t)(self.audioCaptureMicPeak ? atomic_load(self.audioCaptureMicPeak) : 0);
+        event.audio_capture_system_level =
+            (uint8_t)(self.audioCaptureSystemPeak ? atomic_load(self.audioCaptureSystemPeak) : 0);
+    }
+    [self emitEvent:event];
+}
+
+/* One system-mix buffer from the SCStream, already on the capture
+ * queue (the sample handler queue the output was added with), so the
+ * write happens inline here. */
+- (void)audioCaptureNoteSystemBuffer:(CMSampleBufferRef)sampleBuffer {
+    if (!self.audioCaptureActive) return;
+    AVAudioFile *file = self.audioCaptureSystemFile;
+    if (!file || !sampleBuffer || !CMSampleBufferDataIsReady(sampleBuffer)) return;
+
+    const CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (!format) return;
+    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format);
+    if (!asbd) return;
+
+    AVAudioFormat *bufferFormat = [[AVAudioFormat alloc] initWithStreamDescription:asbd];
+    if (!bufferFormat) return;
+    const CMItemCount frames = CMSampleBufferGetNumSamples(sampleBuffer);
+    if (frames <= 0) return;
+
+    AVAudioPCMBuffer *buffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:bufferFormat
+                                                            frameCapacity:(AVAudioFrameCount)frames];
+    if (!buffer) return;
+    buffer.frameLength = (AVAudioFrameCount)frames;
+    if (CMSampleBufferCopyPCMDataIntoAudioBufferList(sampleBuffer,
+                                                     0,
+                                                     (int32_t)frames,
+                                                     buffer.mutableAudioBufferList) != noErr) {
+        return;
+    }
+
+    if (buffer.floatChannelData) {
+        atomic_store(self.audioCaptureSystemPeak,
+                     NativeSdkAudioCapturePeakByte(buffer.floatChannelData[0], buffer.frameLength));
+    }
+
+    NSError *writeError = nil;
+    if (![file writeFromBuffer:buffer error:&writeError]) {
+        __weak NativeSdkAppKitHost *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NativeSdkAppKitHost *strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.audioCaptureActive) return;
+            [strongSelf audioCaptureFailWithReason:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DISK_FULL];
+        });
+        return;
+    }
+    atomic_fetch_add(self.audioCaptureBytes, (uint64_t)buffer.frameLength * 2ull);
+}
+
 /* ---------------------------------------------------- video player
  *
  * The app's single video player: one AVPlayer whose
@@ -11932,6 +12354,50 @@ int native_sdk_appkit_audio_load_url(native_sdk_appkit_host_t *host, const char 
 int native_sdk_appkit_audio_play(native_sdk_appkit_host_t *host) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     return [object audioPlay];
+}
+
+@implementation NativeSdkAudioCaptureOutput
+
+- (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type {
+    (void)stream;
+    if (type != SCStreamOutputTypeAudio) return;
+    NativeSdkAppKitHost *host = self.host;
+    if (!host) return;
+    [host audioCaptureNoteSystemBuffer:sampleBuffer];
+}
+
+/* The stream died on its own (the user revoked Screen Recording
+ * mid-capture, or the display configuration changed under it). Report
+ * it as a failure rather than letting the system track go quietly
+ * silent — a half-recorded session that looks fine is the worst
+ * outcome for a meeting recorder. */
+- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
+    (void)stream;
+    NativeSdkAppKitHost *host = self.host;
+    if (!host) return;
+    const int reason = (error && error.code == SCStreamErrorUserDeclined)
+        ? NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_PERMISSION_DENIED
+        : NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DEVICE_BUSY;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!host.audioCaptureActive) return;
+        [host audioCaptureFailWithReason:reason];
+    });
+}
+
+@end
+
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, uint64_t key, const char *mic_path, size_t mic_path_len, const char *system_path, size_t system_path_len) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *mic_string = [[NSString alloc] initWithBytes:mic_path length:mic_path_len encoding:NSUTF8StringEncoding];
+    if (!mic_string) return 0;
+    NSString *system_string = [[NSString alloc] initWithBytes:system_path length:system_path_len encoding:NSUTF8StringEncoding];
+    if (!system_string) return 0;
+    return [object audioCaptureStartWithKey:key micPath:mic_string systemPath:system_string];
+}
+
+int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, uint64_t key) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioCaptureStopWithKey:key];
 }
 
 int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host) {

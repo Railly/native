@@ -668,6 +668,12 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // position ticks, completions, platform failures — is an
         // external input and must be fed.
         .audio => record.audio_kind == .rejected,
+        // Capture rejections are loop-side validation (path bounds,
+        // equal paths, a start while one runs) that refuses again;
+        // everything else — the start acknowledgment, meter ticks, the
+        // stop totals, TCC and device failures — is external truth the
+        // replayed fake never reproduces, so it feeds.
+        .audio_capture => record.audio_capture_kind == .rejected,
         // Video rejections are the same loop-side validation (source
         // bounds, scheme, surface-id shape) and regenerate; failures —
         // including a claim or platform load the recording host

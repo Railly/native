@@ -2666,6 +2666,27 @@ int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double vo
     return 0;
 }
 
+/* Two-track audio capture lives in the system-engine AppKit host
+ * (AVAudioEngine plus ScreenCaptureKit). The Chromium host reports the
+ * feature unsupported and the Zig side answers
+ * error.UnsupportedService before reaching these, so they exist only to
+ * satisfy the linker — an honest refusal, never half a recording. */
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, uint64_t key, const char *mic_path, size_t mic_path_len, const char *system_path, size_t system_path_len) {
+    (void)host;
+    (void)key;
+    (void)mic_path;
+    (void)mic_path_len;
+    (void)system_path;
+    (void)system_path_len;
+    return 0;
+}
+
+int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, uint64_t key) {
+    (void)host;
+    (void)key;
+    return 0;
+}
+
 /* Video playback lives in the system-engine AppKit host (AVFoundation).
  * The Chromium host reports the feature unsupported and the Zig side
  * refuses before calling, so these exist only to satisfy the shared C

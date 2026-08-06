@@ -59,6 +59,7 @@ const unprefixedNavSections: NavSection[] = [
       { name: "Global Hotkeys", href: "/global-hotkeys" },
       { name: "Commands", href: "/commands" },
       { name: "Native Controls", href: "/native-controls" },
+      { name: "Audio Capture", href: "/audio-capture" },
     ],
   },
   {

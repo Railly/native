@@ -1978,8 +1978,10 @@ test "a replaced load's terminal keeps its own identity under replay" {
 /// Overwrite the `video_width` field of the first journaled `.video`
 /// record carrying `kind`, in place. Per `journal.encodeEffect` the
 /// width sits 26 bytes before the pty trailer (width, height, token,
-/// source, handled), and the pty fields (kind 1, signal 4, drops 4,
-/// blob hash 16, blob len 8 = 33 bytes) end the payload.
+/// source, handled); the pty fields (kind 1, signal 4, drops 4, blob
+/// hash 16, blob len 8 = 33 bytes) follow, and the audio-capture
+/// trailer (kind 1, mic level 1, system level 1, bytes 8, duration 8,
+/// reason 1 = 20 bytes) ends the payload.
 fn patchFirstVideoWidth(bytes: []u8, kind: effects_mod.EffectVideoEventKind, width: u64) bool {
     var pos: usize = journal.preamble_len;
     while (bytes.len - pos >= 5) {
@@ -1990,7 +1992,7 @@ fn patchFirstVideoWidth(bytes: []u8, kind: effects_mod.EffectVideoEventKind, wid
         if (record_kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video or record.video_kind != kind) continue;
-        std.mem.writeInt(u64, payload[payload.len - 59 ..][0..8], width, .little);
+        std.mem.writeInt(u64, payload[payload.len - 79 ..][0..8], width, .little);
         return true;
     }
     return false;
@@ -2082,7 +2084,7 @@ fn patchFirstVideoKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) bool
         if (record_kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video) continue;
-        payload[payload.len - 78] = @intFromEnum(kind);
+        payload[payload.len - 98] = @intFromEnum(kind);
         return true;
     }
     return false;
@@ -2090,8 +2092,8 @@ fn patchFirstVideoKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) bool
 
 /// Overwrite the `video_kind` byte of the first journaled `.video_load`
 /// record, in place. Per `journal.encodeEffect` the video fields are
-/// the 45 bytes before the 33-byte pty trailer and `video_kind` is the
-/// first of them. Framing and every other field stay valid: only
+/// the 45 bytes before the 33-byte pty trailer and the 20-byte
+/// audio-capture trailer, and `video_kind` is the first of them. Framing and every other field stay valid: only
 /// replay's outcome gate can catch the value. Returns whether a record
 /// was damaged.
 fn patchFirstVideoLoadKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) bool {
@@ -2104,7 +2106,7 @@ fn patchFirstVideoLoadKind(bytes: []u8, kind: effects_mod.EffectVideoEventKind) 
         if (record_kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video_load) continue;
-        payload[payload.len - 78] = @intFromEnum(kind);
+        payload[payload.len - 98] = @intFromEnum(kind);
         return true;
     }
     return false;
@@ -2350,10 +2352,11 @@ test "a video load record claiming a non-outcome kind refuses replay as damage" 
 
 /// Overwrite the `video_position_ms` field of the first journaled
 /// video effect record, in place. Per `journal.encodeEffect` the video
-/// fields are the 45 bytes before the 33-byte pty trailer — video_kind
-/// (1), position (8), duration (8), playing (1), buffering (1), width
-/// (8), height (8), token (8), source (1), handled (1) — so the
-/// position lives 77 bytes from the end.
+/// fields are the 45 bytes before the 33-byte pty trailer and the
+/// 20-byte audio-capture trailer — video_kind (1), position (8),
+/// duration (8), playing (1), buffering (1), width (8), height (8),
+/// token (8), source (1), handled (1) — so the position lives 97 bytes
+/// from the end.
 /// Framing and every other field stay valid: only replay's damage gate
 /// can catch the value. Returns whether a record was damaged.
 fn patchFirstVideoPosition(bytes: []u8, position: u64) bool {
@@ -2366,7 +2369,7 @@ fn patchFirstVideoPosition(bytes: []u8, position: u64) bool {
         if (kind != @intFromEnum(journal.RecordKind.effect)) continue;
         const record = journal.decodeEffect(payload) catch continue;
         if (record.kind != .video) continue;
-        std.mem.writeInt(u64, payload[payload.len - 77 ..][0..8], position, .little);
+        std.mem.writeInt(u64, payload[payload.len - 97 ..][0..8], position, .little);
         return true;
     }
     return false;

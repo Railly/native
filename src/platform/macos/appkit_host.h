@@ -38,6 +38,11 @@ typedef enum {
      * the shortcut payload fields, but window_id is meaningless here:
      * the chord fired while some other app held the keyboard. */
     NATIVE_SDK_APPKIT_EVENT_GLOBAL_HOTKEY = 23,
+    /* Merge note: both features independently claimed 23. The hotkey
+     * keeps it (it landed on this branch first) and capture moves to
+     * 24. Nothing had shipped either ordinal outside these branches, so
+     * no wire compatibility was owed to the old value. */
+    NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE = 24,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -58,6 +63,35 @@ typedef enum {
     NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED = 3,
     NATIVE_SDK_APPKIT_AUDIO_EVENT_SPECTRUM = 4,
 } native_sdk_appkit_audio_event_kind_t;
+
+/* Audio recorder reports (EVENT_AUDIO_CAPTURE payloads). STARTED
+ * acknowledges that BOTH tracks are running (the engine tap is
+ * installed and the SCStream delivered its first buffer); LEVEL ticks
+ * at a coarse ~10 Hz carrying peak meters for UI only; STOPPED fires
+ * exactly once per capture with the bytes written across both files
+ * and the elapsed duration; FAILED reports a TCC refusal, a device the
+ * host could not open, or a write that could not land. Ordinals are
+ * mirrored by the Zig side (audioCaptureEventKindFromInt). */
+typedef enum {
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_STARTED = 0,
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_LEVEL = 1,
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_STOPPED = 2,
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_EVENT_FAILED = 3,
+} native_sdk_appkit_audio_capture_event_kind_t;
+
+/* Why a capture failed (FAILED payloads). Each value names a distinct
+ * remedy, mirrored by the Zig side (audioCaptureFailureReasonFromInt):
+ * PERMISSION_DENIED is the TCC refusal (Microphone for the mic track,
+ * Screen Recording for the system track) — the one an app resolves by
+ * sending the user to System Settings; DEVICE_BUSY is an input another
+ * process holds; DISK_FULL is a write that could not land;
+ * UNSUPPORTED is an OS without the capability. */
+typedef enum {
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_PERMISSION_DENIED = 0,
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DEVICE_BUSY = 1,
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DISK_FULL = 2,
+    NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_UNSUPPORTED = 3,
+} native_sdk_appkit_audio_capture_failure_reason_t;
 
 /* Video player reports (EVENT_VIDEO payloads). LOADED acknowledges a
  * successful native_sdk_appkit_video_load (or a ready URL stream) with
@@ -360,6 +394,20 @@ typedef struct {
      * event kind. */
     uint64_t video_width;
     uint64_t video_height;
+    /* EVENT_AUDIO_CAPTURE payloads: the report kind
+     * (native_sdk_appkit_audio_capture_event_kind_t), the capture key
+     * the start named, peak meters on a linear 0..255 scale (LEVEL
+     * only), the bytes written across BOTH files and the elapsed
+     * duration (STOPPED only), and the failure reason (FAILED only).
+     * Captured samples never ride here: the host writes both WAV files
+     * itself and only the paths crossed to start it. */
+    int audio_capture_kind;
+    uint64_t audio_capture_key;
+    uint8_t audio_capture_mic_level;
+    uint8_t audio_capture_system_level;
+    uint64_t audio_capture_bytes_written;
+    uint64_t audio_capture_duration_ms;
+    int audio_capture_reason;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
@@ -541,6 +589,28 @@ int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume);
+
+/* Two-track audio capture: the default input device to mic_path (an
+ * AVAudioEngine input tap) and the system output mix to system_path (a
+ * ScreenCaptureKit audio stream, excluding this process so a recording
+ * never captures its own playback), each written as its own mono WAV by
+ * an AVAudioFile the host owns. Returns 1 when the request was accepted
+ * and 0 when a capture is already running or the files could not be
+ * created. Acceptance is NOT "audio flows": the STARTED acknowledgment,
+ * level meters, the stop totals, and every failure (TCC refusal
+ * included) arrive as EVENT_AUDIO_CAPTURE reports on the run loop.
+ *
+ * The captured PCM never crosses this ABI. An hour of 48 kHz mono is
+ * ~170 MB per track, so only the two destination paths travel — the
+ * same discipline the audio track cache uses for its writes.
+ * Loop-thread only. */
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, uint64_t key, const char *mic_path, size_t mic_path_len, const char *system_path, size_t system_path_len);
+/* Stop the capture named by key, flushing and closing both files; one
+ * STOPPED report follows with the totals. Returns 1 when a capture was
+ * stopped and 0 when the key names none (a harmless no-op: the caller
+ * may be racing a failure that already tore it down). Loop-thread
+ * only. */
+int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, uint64_t key);
 
 /* Where the video player delivers decoded frames: one tightly packed,
  * row-major, straight-alpha RGBA8 frame per call (len = width * height

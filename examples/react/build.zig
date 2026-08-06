@@ -240,13 +240,12 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
-                // Same reason as the chromium branch below: the SDK's
-                // usr/include must stay a SYSTEM include dir. A plain -I
-                // makes clang audit those headers as user code, and
-                // HIToolbox (the global-hotkey API) reaches <signal.h>,
-                // which then floods with nullability diagnostics.
+                // Merge: BOTH fixes are kept. -isystem is what
+                // HIToolbox (global hotkeys) needs; -Wno-nullability-completeness
+                // is what ScreenCaptureKit (system-audio capture) needs.
+                // See build/app.zig for the full reasoning.
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-isystem{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness" };
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
@@ -290,6 +289,9 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         // (vDSP) turns it into band magnitudes.
         app_mod.linkFramework("MediaToolbox", .{});
         app_mod.linkFramework("Accelerate", .{});
+        // System-audio capture (the AppKit host's SCStream audio path).
+        app_mod.linkFramework("ScreenCaptureKit", .{});
+        app_mod.linkFramework("CoreMedia", .{});
         app_mod.linkFramework("Foundation", .{});
         app_mod.linkFramework("CoreText", .{});
         app_mod.linkFramework("UniformTypeIdentifiers", .{});

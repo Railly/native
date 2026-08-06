@@ -286,6 +286,38 @@ pub const NullAudio = struct {
     }
 };
 
+/// The deterministic fake audio recorder: one active two-track capture,
+/// modeling the macOS host's mic tap plus system stream. Byte totals
+/// accrue from a fixed nominal rate so `.stopped` reports the same
+/// numbers for the same elapsed fake time.
+pub const NullAudioCapture = struct {
+    active: bool = false,
+    key: u64 = 0,
+    elapsed_ms: u64 = 0,
+    mic_path_storage: [types.max_audio_capture_path_bytes]u8 = undefined,
+    mic_path_len: usize = 0,
+    system_path_storage: [types.max_audio_capture_path_bytes]u8 = undefined,
+    system_path_len: usize = 0,
+
+    /// Mono 16-bit PCM at 48 kHz: 96 bytes per millisecond, per track.
+    /// The fake's stand-in for what the host's `AVAudioFile` writes.
+    pub const bytes_per_ms: u64 = 96;
+
+    pub fn micPath(self: *const NullAudioCapture) []const u8 {
+        return self.mic_path_storage[0..self.mic_path_len];
+    }
+
+    pub fn systemPath(self: *const NullAudioCapture) []const u8 {
+        return self.system_path_storage[0..self.system_path_len];
+    }
+
+    /// Bytes written per track for the elapsed capture time — the total
+    /// a real host reports on `.stopped`, summed across both files.
+    pub fn bytesWritten(self: *const NullAudioCapture) u64 {
+        return self.elapsed_ms * bytes_per_ms * 2;
+    }
+};
+
 pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
@@ -631,6 +663,32 @@ pub const NullPlatform = struct {
     audio_stop_count: usize = 0,
     audio_seek_count: usize = 0,
     audio_volume_count: usize = 0,
+    /// Whether this modeled host can record. On by default (the fake
+    /// recorder below stands in for the AppKit host's AVAudioEngine tap
+    /// plus ScreenCaptureKit stream); off models Windows and Linux,
+    /// whose hosts ship no recorder — both service fns go absent and the
+    /// feature reports false, so apps get `error.UnsupportedService`
+    /// instead of half a recording.
+    audio_capture: bool = true,
+    /// Whether the modeled TCC grants are in place. False models the
+    /// user declining Microphone or Screen Recording: the start verb
+    /// still ACCEPTS (a real host cannot know synchronously), and the
+    /// capture then fails asynchronously with `.permission_denied` —
+    /// the shape apps must handle, pinned deterministically.
+    audio_capture_permitted: bool = true,
+    /// The deterministic fake recorder: services mutate it, tests read
+    /// it and synthesize the events a live host would deliver
+    /// (`takeAudioCaptureStarted`, `advanceAudioCapture`).
+    audio_capture_state: NullAudioCapture = .{},
+    /// A `.started` acknowledgment waiting to be taken — set by a
+    /// successful `audioCaptureStart`, consumed by
+    /// `takeAudioCaptureStarted`.
+    audio_capture_started_pending: bool = false,
+    /// A `.failed` refusal waiting to be taken, set when a start ran
+    /// against modeled-denied TCC.
+    audio_capture_failed_pending: bool = false,
+    audio_capture_start_count: usize = 0,
+    audio_capture_stop_count: usize = 0,
     /// Whether this modeled host has a video decoder. On by default (the
     /// fake below stands in for AVFoundation); tests modelling a staged
     /// host (Windows/Linux today) set it false BEFORE `platform()` so
@@ -858,6 +916,8 @@ pub const NullPlatform = struct {
                 .audio_stop_fn = if (self.audio_playback) audioStop else null,
                 .audio_seek_fn = if (self.audio_playback) audioSeek else null,
                 .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
+                .audio_capture_start_fn = if (self.audio_capture) audioCaptureStart else null,
+                .audio_capture_stop_fn = if (self.audio_capture) audioCaptureStop else null,
                 .video_load_fn = if (self.video_playback) videoLoad else null,
                 .video_load_url_fn = if (self.video_playback) videoLoadUrl else null,
                 .video_play_fn = if (self.video_playback) videoPlay else null,
@@ -924,6 +984,7 @@ pub const NullPlatform = struct {
             .audio_streaming => self.audio_playback and self.audio_streaming,
             .audio_spectrum => self.audio_playback and self.audio_spectrum,
             .video_playback => self.video_playback,
+            .audio_capture => self.audio_capture,
         };
     }
 
@@ -1685,6 +1746,39 @@ pub const NullPlatform = struct {
         self.audio.volume = volume;
     }
 
+    /// Accept a two-track capture. Like the real host, this answers only
+    /// "the request was taken": whether audio actually flows is reported
+    /// asynchronously, so a modeled TCC refusal arms a `.failed` here
+    /// rather than returning an error. A second start while one runs is
+    /// the caller's bug and refuses synchronously — one recorder, one
+    /// capture, exactly like the single audio player.
+    fn audioCaptureStart(context: ?*anyopaque, key: u64, mic_path: []const u8, system_path: []const u8) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_capture_start_count += 1;
+        if (mic_path.len > types.max_audio_capture_path_bytes) return error.AudioCapturePathTooLarge;
+        if (system_path.len > types.max_audio_capture_path_bytes) return error.AudioCapturePathTooLarge;
+        if (self.audio_capture_state.active) return error.AudioCaptureBusy;
+        self.audio_capture_state = .{ .active = true, .key = key };
+        @memcpy(self.audio_capture_state.mic_path_storage[0..mic_path.len], mic_path);
+        self.audio_capture_state.mic_path_len = mic_path.len;
+        @memcpy(self.audio_capture_state.system_path_storage[0..system_path.len], system_path);
+        self.audio_capture_state.system_path_len = system_path.len;
+        if (self.audio_capture_permitted) {
+            self.audio_capture_started_pending = true;
+        } else {
+            self.audio_capture_failed_pending = true;
+        }
+    }
+
+    /// Stop the named capture. An unknown key is a harmless no-op: the
+    /// caller may be racing a failure that already tore it down.
+    fn audioCaptureStop(context: ?*anyopaque, key: u64) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.audio_capture_stop_count += 1;
+        if (!self.audio_capture_state.active or self.audio_capture_state.key != key) return;
+        self.audio_capture_state.active = false;
+    }
+
     fn audioUrlHash(url: []const u8) u64 {
         return std.hash.Wyhash.hash(0, url);
     }
@@ -1775,6 +1869,70 @@ pub const NullPlatform = struct {
             .position_ms = self.audio.position_ms,
             .duration_ms = self.audio.duration_ms,
             .playing = true,
+        } };
+    }
+
+    /// Consume the pending capture acknowledgment: the `.started` a live
+    /// host delivers once both tracks run, or the `.failed`
+    /// (`.permission_denied`) a TCC refusal produces. Null when no start
+    /// is waiting. Dispatch it through the runtime, like
+    /// `takeAudioLoaded`.
+    pub fn takeAudioCaptureStarted(self: *NullPlatform) ?Event {
+        if (self.audio_capture_failed_pending) {
+            self.audio_capture_failed_pending = false;
+            const key = self.audio_capture_state.key;
+            // A refused capture never ran: the host tore it down before
+            // any frame, so the fake recorder goes idle too.
+            self.audio_capture_state = .{};
+            return .{ .audio_capture = .{
+                .key = key,
+                .kind = .failed,
+                .reason = .permission_denied,
+            } };
+        }
+        if (!self.audio_capture_started_pending) return null;
+        self.audio_capture_started_pending = false;
+        return .{ .audio_capture = .{
+            .key = self.audio_capture_state.key,
+            .kind = .started,
+        } };
+    }
+
+    /// Test helper: advance the fake capture by `delta_ms` and
+    /// synthesize the `.level` meter tick a live host's ~10 Hz timer
+    /// would deliver. Levels are a pure function of elapsed time (a slow
+    /// triangle, mic and system offset so the two tracks are
+    /// distinguishable), so the same fake capture always reports the
+    /// same meters and the journal round-trips exactly. Null when
+    /// nothing is capturing — meters never tick on their own.
+    pub fn advanceAudioCapture(self: *NullPlatform, delta_ms: u64) ?Event {
+        if (!self.audio_capture_state.active) return null;
+        self.audio_capture_state.elapsed_ms += delta_ms;
+        const phase = self.audio_capture_state.elapsed_ms % 512;
+        const ramp: u8 = @intCast(if (phase < 256) phase else 511 - phase);
+        return .{ .audio_capture = .{
+            .key = self.audio_capture_state.key,
+            .kind = .level,
+            .mic_level = ramp,
+            .system_level = 255 - ramp,
+        } };
+    }
+
+    /// Test helper: synthesize the `.stopped` report a live host
+    /// delivers after flushing and closing both files — the byte total
+    /// across the two tracks and the capture's duration. Null when
+    /// nothing was captured since the last stop.
+    pub fn takeAudioCaptureStopped(self: *NullPlatform) ?Event {
+        if (self.audio_capture_state.active or self.audio_capture_state.elapsed_ms == 0) return null;
+        const key = self.audio_capture_state.key;
+        const bytes = self.audio_capture_state.bytesWritten();
+        const duration_ms = self.audio_capture_state.elapsed_ms;
+        self.audio_capture_state = .{};
+        return .{ .audio_capture = .{
+            .key = key,
+            .kind = .stopped,
+            .bytes_written = bytes,
+            .duration_ms = duration_ms,
         } };
     }
 

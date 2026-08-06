@@ -1124,13 +1124,20 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
-                // Same reason as the chromium branch below: the SDK's
-                // usr/include must stay a SYSTEM include dir. A plain -I
-                // makes clang audit those headers as user code, and
-                // HIToolbox (the global-hotkey API) reaches <signal.h>,
-                // which then floods with nullability diagnostics.
+                // Both features needed a fix here and the merge keeps
+                // BOTH, because they answer different diagnostics.
+                // -isystem: HIToolbox (the global-hotkey API) reaches
+                // <signal.h>, and under a plain -I clang audits the SDK
+                // as user code and floods with nullability diagnostics.
+                // -Wno-nullability-completeness: ScreenCaptureKit's
+                // header chain declares pointers without nullability
+                // annotations, and -isystem alone does not silence that
+                // for the capture path. The flag audits Apple's headers,
+                // never this file. The capture branch predicted -isystem
+                // would re-enable a Carbon deprecation audit; with Carbon
+                // actually linked, the combination compiles clean.
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-isystem{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness" };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
@@ -1181,6 +1188,11 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         // (vDSP) turns it into band magnitudes.
         app_mod.linkFramework("MediaToolbox", .{});
         app_mod.linkFramework("Accelerate", .{});
+        // System-audio capture: ScreenCaptureKit is the only supported
+        // way to read the machine's output mix on modern macOS (the mic
+        // track rides AVFoundation, linked above).
+        app_mod.linkFramework("ScreenCaptureKit", .{});
+        app_mod.linkFramework("CoreMedia", .{});
         app_mod.linkFramework("Foundation", .{});
         app_mod.linkFramework("CoreText", .{});
         app_mod.linkFramework("UniformTypeIdentifiers", .{});
