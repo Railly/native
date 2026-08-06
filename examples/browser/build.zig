@@ -178,7 +178,7 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         switch (web_engine) {
             .system => {
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness" };
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
@@ -215,6 +215,9 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         // (vDSP) turns it into band magnitudes.
         app_mod.linkFramework("MediaToolbox", .{});
         app_mod.linkFramework("Accelerate", .{});
+        // System-audio capture (the AppKit host's SCStream audio path).
+        app_mod.linkFramework("ScreenCaptureKit", .{});
+        app_mod.linkFramework("CoreMedia", .{});
         app_mod.linkFramework("Foundation", .{});
         app_mod.linkFramework("CoreText", .{});
         app_mod.linkFramework("UniformTypeIdentifiers", .{});

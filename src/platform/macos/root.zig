@@ -42,6 +42,7 @@ const AppKitEventKind = enum(c_int) {
     audio = 20,
     video = 21,
     view_focused = 22,
+    audio_capture = 23,
 };
 
 const AppKitEvent = extern struct {
@@ -139,6 +140,20 @@ const AppKitEvent = extern struct {
     /// sink's pixel budget. Zeros on every other kind.
     video_width: u64,
     video_height: u64,
+    /// Audio recorder report payload (`kind == .audio_capture`): the
+    /// `AudioCaptureEventKind` ordinal, the capture key, peak meters
+    /// (`.level` only), the totals across both files (`.stopped` only),
+    /// and the failure reason (`.failed` only). Captured samples never
+    /// ride here — the host writes both WAV files itself. Field order
+    /// mirrors `native_sdk_appkit_event_t`, where these follow the
+    /// video block.
+    audio_capture_kind: c_int,
+    audio_capture_key: u64,
+    audio_capture_mic_level: u8,
+    audio_capture_system_level: u8,
+    audio_capture_bytes_written: u64,
+    audio_capture_duration_ms: u64,
+    audio_capture_reason: c_int,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -205,6 +220,8 @@ extern fn native_sdk_appkit_audio_pause(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_stop(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_seek(host: *AppKitHost, position_ms: u64) c_int;
 extern fn native_sdk_appkit_audio_set_volume(host: *AppKitHost, volume: f64) c_int;
+extern fn native_sdk_appkit_audio_capture_start(host: *AppKitHost, key: u64, mic_path: [*]const u8, mic_path_len: usize, system_path: [*]const u8, system_path_len: usize) c_int;
+extern fn native_sdk_appkit_audio_capture_stop(host: *AppKitHost, key: u64) c_int;
 extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_play(host: *AppKitHost) c_int;
@@ -750,6 +767,8 @@ pub const MacPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                .audio_capture_start_fn = audioCaptureStart,
+                .audio_capture_stop_fn = audioCaptureStop,
                 .video_load_fn = videoLoad,
                 .video_load_url_fn = videoLoadUrl,
                 .video_play_fn = videoPlay,
@@ -1007,6 +1026,15 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .buffering = event.audio_buffering != 0,
             .bands = event.audio_bands,
         } }),
+        .audio_capture => state.emit(.{ .audio_capture = .{
+            .key = event.audio_capture_key,
+            .kind = audioCaptureEventKindFromInt(event.audio_capture_kind),
+            .mic_level = event.audio_capture_mic_level,
+            .system_level = event.audio_capture_system_level,
+            .bytes_written = event.audio_capture_bytes_written,
+            .duration_ms = event.audio_capture_duration_ms,
+            .reason = audioCaptureFailureReasonFromInt(event.audio_capture_reason),
+        } }),
         .video => state.emit(.{ .video = .{
             .kind = videoEventKindFromInt(event.video_kind),
             .token = event.video_token,
@@ -1057,6 +1085,30 @@ fn audioEventKindFromInt(value: c_int) platform_mod.AudioEventKind {
         2 => .completed,
         4 => .spectrum,
         else => .failed,
+    };
+}
+
+/// Ordinals match `native_sdk_appkit_audio_capture_event_kind_t` in
+/// appkit_host.h; anything unknown degrades to `.failed` so a host/SDK
+/// skew is loud in the app instead of undefined behavior here.
+fn audioCaptureEventKindFromInt(value: c_int) platform_mod.AudioCaptureEventKind {
+    return switch (value) {
+        0 => .started,
+        1 => .level,
+        2 => .stopped,
+        else => .failed,
+    };
+}
+
+/// Ordinals match `native_sdk_appkit_audio_capture_failure_reason_t` in
+/// appkit_host.h. An unknown reason degrades to `.unsupported` — the
+/// value that promises the app nothing about a retry.
+fn audioCaptureFailureReasonFromInt(value: c_int) platform_mod.AudioCaptureFailureReason {
+    return switch (value) {
+        0 => .permission_denied,
+        1 => .device_busy,
+        2 => .disk_full,
+        else => .unsupported,
     };
 }
 
@@ -1519,6 +1571,33 @@ fn audioLoadUrl(context: ?*anyopaque, url: []const u8, cache_path: []const u8, e
 fn audioPlay(context: ?*anyopaque) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_audio_play(self.host) == 0) return error.InvalidAudioOptions;
+}
+
+/// Start the two-track capture. A 0 answer means the host refused the
+/// request outright — a capture already running, or two files it could
+/// not create. Everything asynchronous (TCC refusals included) arrives
+/// as `.audio_capture` events instead.
+fn audioCaptureStart(context: ?*anyopaque, key: u64, mic_path: []const u8, system_path: []const u8) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const accepted = native_sdk_appkit_audio_capture_start(
+        self.host,
+        key,
+        mic_path.ptr,
+        mic_path.len,
+        system_path.ptr,
+        system_path.len,
+    );
+    if (accepted == 0) return error.AudioCaptureBusy;
+}
+
+/// Stop the named capture. A 0 answer means the key named no active
+/// capture — a harmless no-op, not an error: the caller may be racing a
+/// failure that already tore it down.
+fn audioCaptureStop(context: ?*anyopaque, key: u64) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    _ = native_sdk_appkit_audio_capture_stop(self.host, key);
 }
 
 fn audioPause(context: ?*anyopaque) anyerror!void {

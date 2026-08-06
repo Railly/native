@@ -1125,7 +1125,14 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         switch (web_engine) {
             .system => {
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+                // ScreenCaptureKit's header chain (the system-audio capture path) reaches
+                // SDK headers that declare pointers without nullability annotations. Under
+                // the plain -I above those are ordinary user includes, so the audit fires
+                // per declaration and buries the real diagnostics. Reclassifying the SDK as
+                // -isystem silences it but re-enables the Carbon deprecation audit instead,
+                // so the narrow fix is to turn off this one warning: it audits Apple's
+                // headers, never this file.
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-Wno-nullability-completeness" };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
             },
@@ -1165,6 +1172,11 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         // (vDSP) turns it into band magnitudes.
         app_mod.linkFramework("MediaToolbox", .{});
         app_mod.linkFramework("Accelerate", .{});
+        // System-audio capture: ScreenCaptureKit is the only supported
+        // way to read the machine's output mix on modern macOS (the mic
+        // track rides AVFoundation, linked above).
+        app_mod.linkFramework("ScreenCaptureKit", .{});
+        app_mod.linkFramework("CoreMedia", .{});
         app_mod.linkFramework("Foundation", .{});
         app_mod.linkFramework("CoreText", .{});
         app_mod.linkFramework("UniformTypeIdentifiers", .{});
