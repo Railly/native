@@ -1494,6 +1494,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         try self.effects.feedAudioSpectrum(record.audio_bands, record.audio_position_ms, record.audio_duration_ms)
                     else
                         try self.effects.feedAudioEventBuffering(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing, record.audio_buffering),
+                    // `.audio_capture` records feed the whole journaled
+                    // event verbatim. The recording's AUDIO is not in
+                    // the journal and a replay writes no files — this
+                    // replays the event stream (meters, totals,
+                    // failures) that drove the app's model, which is
+                    // the only part `update` ever saw.
+                    .audio_capture => try self.effects.feedAudioCaptureEvent(.{
+                        .key = record.key,
+                        .kind = record.audio_capture_kind,
+                        .mic_level = record.audio_capture_mic_level,
+                        .system_level = record.audio_capture_system_level,
+                        .bytes_written = record.audio_capture_bytes_written,
+                        .duration_ms = record.audio_capture_duration_ms,
+                        .reason = record.audio_capture_reason,
+                    }),
                     // `.video` records feed the whole journaled shape —
                     // dimensions included — routed by the journaled
                     // load identity (`video_token`), so replay delivers
@@ -3966,6 +3981,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // channel into the app's `on_event` Msg (and journal on
                 // the way — the recorded boundary).
                 .audio => |audio_event| if (self.effects.takeAudioMsg(audio_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                // Platform capture reports route the same way: through
+                // the effects channel into the app's `on_event` Msg,
+                // journaled at the delivery boundary. No house chrome
+                // rebuild — recording has no rendered transport of its
+                // own, and meters are the app's to draw.
+                .audio_capture => |capture_event| if (self.effects.takeAudioCaptureMsg(capture_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 },
                 // Platform video reports route the same way: through

@@ -337,6 +337,12 @@ pub const Event = union(enum) {
     /// Pixels never ride events — frames feed the media-surface
     /// texture channel platform-side.
     video: platform.VideoEvent,
+    /// A platform audio recorder report (start acknowledgment, coarse
+    /// level meter, stop totals, failure): routed back through
+    /// `Effects.takeAudioCaptureMsg` into the app's `on_event` Msg.
+    /// Captured samples never ride events — the host writes both WAV
+    /// files itself and only the paths crossed to start it.
+    audio_capture: platform.AudioCaptureEvent,
     files_dropped: platform.FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -367,6 +373,7 @@ pub const Event = union(enum) {
             .effects_wake => "effects_wake",
             .audio => "audio",
             .video => "video",
+            .audio_capture => "audio_capture",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",

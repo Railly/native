@@ -2900,10 +2900,12 @@ test "a journal referencing blobs refuses to replay without its blob store" {
 /// fields — video_kind (1), position (8), duration (8), playing (1),
 /// buffering (1), width (8), height (8), token (8), source (1),
 /// handled (1) — then the pty fields — pty_kind (1), pty_signal (4),
-/// pty_dropped_writes (4), pty_blob_hash (16), pty_blob_len (8). The
-/// image fields the damage helpers below patch sit immediately before
-/// it.
-const effect_post_image_trailer_len: usize = 83;
+/// pty_dropped_writes (4), pty_blob_hash (16), pty_blob_len (8) — and
+/// finally the audio-capture fields — audio_capture_kind (1), mic_level
+/// (1), system_level (1), bytes_written (8), duration_ms (8), reason
+/// (1). The image fields the damage helpers below patch sit immediately
+/// before it.
+const effect_post_image_trailer_len: usize = 103;
 
 /// Zero the `image_blob_len` field — the last eight bytes before the
 /// post-image trailer of the effect payload, see `journal.encodeEffect`
