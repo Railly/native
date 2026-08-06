@@ -10584,12 +10584,28 @@ static uint8_t NativeSdkAudioCapturePeakByte(const float *samples, size_t count)
                          NativeSdkAudioCapturePeakByte(buffer.floatChannelData[0], buffer.frameLength));
         }
         /* Writes hop to the capture queue: the tap runs on a realtime
-         * audio thread, and file IO must never block it. */
+         * audio thread, and file IO must never block it. The engine
+         * REUSES its tap buffer as soon as this block returns, so the
+         * frames are copied into a private buffer first — handing the
+         * engine's own buffer to an async write silently truncates the
+         * track (the writer races the next callback overwriting it). */
+        AVAudioPCMBuffer *owned = [[AVAudioPCMBuffer alloc] initWithPCMFormat:buffer.format
+                                                               frameCapacity:buffer.frameLength];
+        if (!owned) return;
+        owned.frameLength = buffer.frameLength;
+        const AudioBufferList *source = buffer.audioBufferList;
+        AudioBufferList *destination = owned.mutableAudioBufferList;
+        for (UInt32 index = 0; index < source->mNumberBuffers && index < destination->mNumberBuffers; index += 1) {
+            const UInt32 bytes = source->mBuffers[index].mDataByteSize;
+            if (!source->mBuffers[index].mData || !destination->mBuffers[index].mData) continue;
+            memcpy(destination->mBuffers[index].mData, source->mBuffers[index].mData, bytes);
+            destination->mBuffers[index].mDataByteSize = bytes;
+        }
         dispatch_async(strongSelf.audioCaptureQueue, ^{
             AVAudioFile *file = strongSelf.audioCaptureMicFile;
             if (!file) return;
             NSError *writeError = nil;
-            if (![file writeFromBuffer:buffer error:&writeError]) {
+            if (![file writeFromBuffer:owned error:&writeError]) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (!strongSelf.audioCaptureActive) return;
                     [strongSelf audioCaptureFailWithReason:NATIVE_SDK_APPKIT_AUDIO_CAPTURE_FAILURE_DISK_FULL];
@@ -10597,7 +10613,7 @@ static uint8_t NativeSdkAudioCapturePeakByte(const float *samples, size_t count)
                 return;
             }
             atomic_fetch_add(strongSelf.audioCaptureBytes,
-                             (uint64_t)buffer.frameLength * 2ull);
+                             (uint64_t)owned.frameLength * 2ull);
         });
     }];
 
