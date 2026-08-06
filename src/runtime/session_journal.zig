@@ -182,6 +182,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "bridge_message=" ++ layout_fingerprint.describe(platform.BridgeMessage) ++ "\n" ++
             "tray_action=" ++ layout_fingerprint.describe(platform.TrayItemId) ++ "\n" ++
             "shortcut=" ++ layout_fingerprint.describe(platform.ShortcutEvent) ++ "\n" ++
+            "global_hotkey=" ++ layout_fingerprint.describe(platform.GlobalHotkeyEvent) ++ "\n" ++
             "native_command=" ++ layout_fingerprint.describe(platform.NativeCommandEvent) ++ "\n" ++
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
@@ -464,6 +465,7 @@ const EventTag = enum(u8) {
     audio = 24,
     video = 25,
     view_focused = 26,
+    global_hotkey = 27,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -593,6 +595,14 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeStr(shortcut.key);
             try writeModifiers(&cursor, shortcut.modifiers);
             try cursor.writeInt(u64, shortcut.window_id);
+        },
+        // The shortcut shape minus the window id: a global hotkey names
+        // no window, so there is none to journal or replay.
+        .global_hotkey => |hotkey| {
+            try cursor.writeEnum(EventTag.global_hotkey);
+            try cursor.writeStr(hotkey.id);
+            try cursor.writeStr(hotkey.key);
+            try writeModifiers(&cursor, hotkey.modifiers);
         },
         .native_command => |command| {
             try cursor.writeEnum(EventTag.native_command);
@@ -812,6 +822,15 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
                 .key = key,
                 .modifiers = modifiers,
                 .window_id = try cursor.readInt(u64),
+            } };
+        },
+        .global_hotkey => blk: {
+            const id = try cursor.readStr();
+            const key = try cursor.readStr();
+            break :blk .{ .global_hotkey = .{
+                .id = id,
+                .key = key,
+                .modifiers = try readModifiers(&cursor),
             } };
         },
         .native_command => blk: {

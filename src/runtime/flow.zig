@@ -103,6 +103,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             try self.options.platform.services.configureSecurityPolicy(self.options.security);
             try self.options.platform.services.configureMenus(self.options.menus);
             try self.options.platform.services.configureShortcuts(self.options.shortcuts);
+            try self.options.platform.services.configureGlobalHotkeys(self.options.global_hotkeys);
             // Automation liveness: the drain (`consumeAutomationCommand`,
             // in `frame` below) runs at most once per frame_requested
             // turn, and an idle app produces no frames — so a queued
@@ -379,6 +380,16 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     emitShortcutEvent(self, shortcut) catch |err| log(self, "shortcut.emit_failed", @errorName(err), &.{trace.string("id", shortcut.id)});
                     self.invalidateFor(.command, null);
                 },
+                // No `dispatchCommand` twin here, deliberately: a
+                // command carries the window it acted on, and this event
+                // fired while some OTHER app held the keyboard. The app
+                // receives the raw event and decides what (and which
+                // window) it means.
+                .global_hotkey => |hotkey| {
+                    try dispatchEvent(self, app, .{ .global_hotkey = hotkey });
+                    emitGlobalHotkeyEvent(self, hotkey) catch |err| log(self, "global_hotkey.emit_failed", @errorName(err), &.{trace.string("id", hotkey.id)});
+                    self.invalidateFor(.command, null);
+                },
                 .native_command => |command| {
                     try dispatchCommand(self, app, .{
                         .name = command.name,
@@ -510,6 +521,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.command, null);
                 },
                 .shortcut => {
+                    self.invalidateFor(.command, null);
+                },
+                .global_hotkey => {
                     self.invalidateFor(.command, null);
                 },
                 .appearance_changed => {
@@ -1205,6 +1219,33 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 shortcut.modifiers.shift,
             });
             try emitWindowEvent(self, shortcut.window_id, "shortcut", writer.buffered());
+        }
+
+        /// Broadcast to every open window, like the app lifecycle edges
+        /// and unlike `emitShortcutEvent`: the hotkey named no window, so
+        /// there is no single bridge that owns it. A windowless app
+        /// simply has no listeners, which is correct — the Zig-side
+        /// `.global_hotkey` event already fired.
+        fn emitGlobalHotkeyEvent(self: *Runtime, hotkey: platform.GlobalHotkeyEvent) anyerror!void {
+            var buffer: [512]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try writer.writeAll("{\"id\":");
+            try json.writeString(&writer, hotkey.id);
+            try writer.writeAll(",\"command\":");
+            try json.writeString(&writer, hotkey.id);
+            try writer.writeAll(",\"key\":");
+            try json.writeString(&writer, hotkey.key);
+            try writer.print(",\"modifiers\":{{\"primary\":{},\"command\":{},\"control\":{},\"option\":{},\"shift\":{}}}}}", .{
+                hotkey.modifiers.primary,
+                hotkey.modifiers.command,
+                hotkey.modifiers.control,
+                hotkey.modifiers.option,
+                hotkey.modifiers.shift,
+            });
+            const detail = writer.buffered();
+            for (self.windows[0..self.window_count]) |window| {
+                if (window.info.open) try emitWindowEvent(self, window.info.id, "global_hotkey", detail);
+            }
         }
 
         fn emitAppLifecycleEvent(self: *Runtime, name: []const u8) anyerror!void {

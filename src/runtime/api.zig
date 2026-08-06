@@ -43,6 +43,7 @@ pub const CommandSource = enum {
 };
 
 pub const ShortcutEvent = platform.ShortcutEvent;
+pub const GlobalHotkeyEvent = platform.GlobalHotkeyEvent;
 pub const TimerEvent = platform.TimerEvent;
 pub const Appearance = platform.Appearance;
 pub const GpuFrame = platform.GpuFrame;
@@ -322,6 +323,12 @@ pub const Event = union(enum) {
     appearance_changed: Appearance,
     command: CommandEvent,
     shortcut: ShortcutEvent,
+    /// A system-wide hotkey fired, possibly while another app held
+    /// focus. Delivered as a raw event rather than a `.command` because
+    /// commands are window-addressed and a global hotkey has no window
+    /// to address: routing it through the command path would require
+    /// inventing a window id the user never focused.
+    global_hotkey: GlobalHotkeyEvent,
     timer: TimerEvent,
     /// The platform loop was nudged from another thread
     /// (`PlatformServices.wake_fn`): apps drain their effect completion
@@ -363,6 +370,7 @@ pub const Event = union(enum) {
             .appearance_changed => "appearance_changed",
             .command => |event_value| event_value.name,
             .shortcut => "shortcut",
+            .global_hotkey => "global_hotkey",
             .timer => "timer",
             .effects_wake => "effects_wake",
             .audio => "audio",
@@ -487,6 +495,7 @@ pub const Options = struct {
     commands: []const Command = &.{},
     menus: []const platform.Menu = &.{},
     shortcuts: []const platform.Shortcut = &.{},
+    global_hotkeys: []const platform.GlobalHotkey = &.{},
     automation: ?automation.Server = null,
     window_state_store: ?window_state.Store = null,
     js_window_api: bool = false,
