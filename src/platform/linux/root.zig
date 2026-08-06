@@ -470,6 +470,13 @@ pub const LinuxPlatform = struct {
             // are macOS-only today; GTK keeps the engine's wheel
             // physics.
             .gpu_surface_scroll_drivers, .view_surface_adoption => false,
+            // System-wide hotkeys have no portable X11/Wayland answer:
+            // X11 needs XGrabKey per chord against every modifier
+            // permutation, and Wayland forbids global grabs outright
+            // (the compositor owns them, exposed only through desktop
+            // portals that vary by DE). An honest false beats a
+            // display-server-dependent half-feature.
+            .global_hotkeys => false,
             // Video decode (a GStreamer appsink feeding the
             // media-surface texture channel) is not implemented yet:
             // an honest false rather than a half-implemented player.

@@ -90,6 +90,13 @@ pub const PlatformFeature = enum {
     menus,
     tray,
     shortcuts,
+    /// System-wide hotkeys that fire while ANOTHER app holds focus
+    /// (macOS: Carbon `RegisterEventHotKey` against the process-wide
+    /// event dispatcher — no Accessibility permission, unlike an event
+    /// tap). Distinct from `shortcuts`, which is a local key monitor and
+    /// is structurally incapable of firing unfocused. Delivered as
+    /// `.global_hotkey` events, which carry no window id.
+    global_hotkeys,
     dialogs,
     clipboard_text,
     clipboard_rich_data,
@@ -264,6 +271,9 @@ pub const max_menu_key_bytes: usize = 32;
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
 pub const max_shortcut_key_bytes: usize = 32;
+/// Mirrors `app_manifest.max_global_hotkeys`: each entry is a claim on a
+/// system-wide chord, so the ceiling is far below the local-shortcut one.
+pub const max_global_hotkeys: usize = 16;
 pub const max_widget_accessibility_nodes: usize = 64;
 pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
 /// Payload bound for the compact binary gpu-surface packet encoding
@@ -331,6 +341,26 @@ pub const ShortcutEvent = struct {
     window_id: WindowId = 1,
 };
 
+/// A system-wide hotkey declaration (see `app_manifest.GlobalHotkey`).
+pub const GlobalHotkey = struct {
+    id: []const u8,
+    key: []const u8,
+    modifiers: ShortcutModifiers = .{},
+};
+
+/// A global hotkey firing. Deliberately WITHOUT a `window_id`: the whole
+/// point of a global hotkey is that it arrives while another app owns
+/// the keyboard, so there is no focused window of this app's to name. A
+/// default of 1 would be a fabricated answer to "which window?" — the
+/// honest shape is not to carry the field, which is also why the
+/// runtime delivers this as a raw event instead of routing it through
+/// the window-addressed command path.
+pub const GlobalHotkeyEvent = struct {
+    id: []const u8,
+    key: []const u8,
+    modifiers: ShortcutModifiers = .{},
+};
+
 pub const Menu = struct {
     title: []const u8,
     items: []const MenuItem = &.{},
@@ -350,6 +380,15 @@ pub fn validateShortcut(shortcut: Shortcut) Error!void {
     if (!isValidCommandId(shortcut.id, max_shortcut_id_bytes)) return error.InvalidShortcut;
     if (!isValidShortcutKey(shortcut.key)) return error.InvalidShortcut;
     if (!shortcut.modifiers.hasAny() and shortcutRequiresModifier(shortcut.key)) return error.InvalidShortcut;
+}
+
+/// The service-boundary twin of `app_manifest.validateGlobalHotkeys`'
+/// per-entry rules: a bare chord is refused for EVERY key kind, not just
+/// text keys, because the claim is system-wide.
+pub fn validateGlobalHotkey(hotkey: GlobalHotkey) Error!void {
+    if (!isValidCommandId(hotkey.id, max_shortcut_id_bytes)) return error.InvalidShortcut;
+    if (!isValidShortcutKey(hotkey.key)) return error.InvalidShortcut;
+    if (!hotkey.modifiers.hasAny()) return error.InvalidShortcut;
 }
 
 pub fn validateMenus(menus: []const Menu) Error!void {
@@ -2241,6 +2280,9 @@ pub const Event = union(enum) {
     bridge_message: BridgeMessage,
     tray_action: TrayItemId,
     shortcut: ShortcutEvent,
+    /// A system-wide hotkey fired. May arrive while this app is
+    /// unfocused, hidden, or windowless, which is why it names no window.
+    global_hotkey: GlobalHotkeyEvent,
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
     timer: TimerEvent,
@@ -2278,6 +2320,7 @@ pub const Event = union(enum) {
             .bridge_message => "bridge_message",
             .tray_action => "tray_action",
             .shortcut => "shortcut",
+            .global_hotkey => "global_hotkey",
             .native_command => "native_command",
             .menu_command => "menu_command",
             .timer => "timer",
@@ -2416,6 +2459,12 @@ pub const PlatformServices = struct {
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
+    /// Replace the app's set of system-wide hotkeys (the whole set every
+    /// call, like `configure_shortcuts_fn`). Hosts register each chord
+    /// with the OS; a chord another app already owns is skipped by the
+    /// host rather than failing the whole call, because which chords are
+    /// free is a property of the running machine, not of the app.
+    configure_global_hotkeys_fn: ?*const fn (context: ?*anyopaque, hotkeys: []const GlobalHotkey) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
     request_gpu_surface_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     /// Input was dispatched to the surface: hosts that throttle occluded
@@ -2983,6 +3032,19 @@ pub const PlatformServices = struct {
         return configure_fn(self.context, shortcuts);
     }
 
+    /// Same refusal shape as `configureShortcuts`: a platform without the
+    /// verb accepts an EMPTY set silently (nothing was asked for) and
+    /// refuses a non-empty one by name, so an app that declares hotkeys
+    /// on a host that cannot deliver them learns at startup instead of
+    /// waiting forever for an event that will never arrive.
+    pub fn configureGlobalHotkeys(self: PlatformServices, hotkeys: []const GlobalHotkey) anyerror!void {
+        const configure_fn = self.configure_global_hotkeys_fn orelse {
+            if (hotkeys.len == 0) return;
+            return error.UnsupportedService;
+        };
+        return configure_fn(self.context, hotkeys);
+    }
+
     pub fn emitWindowEvent(self: PlatformServices, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void {
         const emit_fn = self.emit_window_event_fn orelse return error.UnsupportedService;
         return emit_fn(self.context, window_id, name, detail_json);
@@ -3286,6 +3348,7 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         .menus => services.configure_menus_fn != null,
         .tray => services.create_tray_fn != null,
         .shortcuts => services.configure_shortcuts_fn != null,
+        .global_hotkeys => services.configure_global_hotkeys_fn != null,
         .dialogs => services.show_open_dialog_fn != null or services.show_save_dialog_fn != null or services.show_message_dialog_fn != null,
         .clipboard_text => services.read_clipboard_fn != null and services.write_clipboard_fn != null,
         .clipboard_rich_data => services.read_clipboard_data_fn != null and services.write_clipboard_data_fn != null,

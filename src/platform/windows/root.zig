@@ -541,6 +541,12 @@ pub const WindowsPlatform = struct {
             // are macOS-only today; Win32 keeps the engine's wheel
             // physics.
             .gpu_surface_scroll_drivers, .view_surface_adoption => false,
+            // System-wide hotkeys are reachable on Win32
+            // (RegisterHotKey + WM_HOTKEY on the message loop) but are
+            // not implemented yet: an honest false rather than a
+            // half-wired registration, matching how video_playback
+            // reports here.
+            .global_hotkeys => false,
             // Video decode (a Media Foundation session feeding the
             // media-surface texture channel) is not implemented yet:
             // an honest false rather than a half-implemented player.

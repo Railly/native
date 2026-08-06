@@ -59,14 +59,18 @@ const max_menu_key_bytes = types.max_menu_key_bytes;
 const max_shortcuts = types.max_shortcuts;
 const max_shortcut_id_bytes = types.max_shortcut_id_bytes;
 const max_shortcut_key_bytes = types.max_shortcut_key_bytes;
+const max_global_hotkeys = types.max_global_hotkeys;
 const max_widget_accessibility_nodes = types.max_widget_accessibility_nodes;
 const max_gpu_surface_packet_json_bytes = types.max_gpu_surface_packet_json_bytes;
 const ShortcutModifiers = types.ShortcutModifiers;
 const Shortcut = types.Shortcut;
 const ShortcutEvent = types.ShortcutEvent;
+const GlobalHotkey = types.GlobalHotkey;
+const GlobalHotkeyEvent = types.GlobalHotkeyEvent;
 const Menu = types.Menu;
 const MenuItem = types.MenuItem;
 const validateShortcut = types.validateShortcut;
+const validateGlobalHotkey = types.validateGlobalHotkey;
 const validateMenus = types.validateMenus;
 const validateMenuItem = types.validateMenuItem;
 const isValidShortcutKey = types.isValidShortcutKey;
@@ -317,6 +321,8 @@ pub const NullPlatform = struct {
     menu_item_count: usize = 0,
     shortcuts: [max_shortcuts]Shortcut = undefined,
     shortcut_count: usize = 0,
+    global_hotkeys: [max_global_hotkeys]GlobalHotkey = undefined,
+    global_hotkey_count: usize = 0,
     window_sources: [max_windows]?WebViewSource = [_]?WebViewSource{null} ** max_windows,
     windows: [max_windows]WindowInfo = undefined,
     /// Captured `WindowOptions.resizable` per created window, indexed
@@ -841,6 +847,7 @@ pub const NullPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
+                .configure_global_hotkeys_fn = configureGlobalHotkeys,
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
@@ -888,6 +895,7 @@ pub const NullPlatform = struct {
             .native_control_commands,
             .menus,
             .shortcuts,
+            .global_hotkeys,
             .dialogs,
             .clipboard_text,
             .clipboard_rich_data,
@@ -1569,6 +1577,16 @@ pub const NullPlatform = struct {
             self.shortcuts[index] = shortcut;
         }
         self.shortcut_count = shortcuts.len;
+    }
+
+    fn configureGlobalHotkeys(context: ?*anyopaque, hotkeys: []const GlobalHotkey) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (hotkeys.len > self.global_hotkeys.len) return error.InvalidShortcut;
+        for (hotkeys, 0..) |hotkey, index| {
+            try validateGlobalHotkey(hotkey);
+            self.global_hotkeys[index] = hotkey;
+        }
+        self.global_hotkey_count = hotkeys.len;
     }
 
     fn startTimer(context: ?*anyopaque, id: u64, interval_ns: u64, repeats: bool) anyerror!void {
@@ -2819,6 +2837,10 @@ pub const NullPlatform = struct {
 
     pub fn configuredShortcuts(self: *const NullPlatform) []const Shortcut {
         return self.shortcuts[0..self.shortcut_count];
+    }
+
+    pub fn configuredGlobalHotkeys(self: *const NullPlatform) []const GlobalHotkey {
+        return self.global_hotkeys[0..self.global_hotkey_count];
     }
 
     pub fn configuredMenus(self: *const NullPlatform) []const Menu {
