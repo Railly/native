@@ -42,6 +42,7 @@ const AppKitEventKind = enum(c_int) {
     audio = 20,
     video = 21,
     view_focused = 22,
+    global_hotkey = 23,
 };
 
 const AppKitEvent = extern struct {
@@ -173,6 +174,7 @@ extern fn native_sdk_appkit_emit_window_event(host: *AppKitHost, window_id: u64,
 extern fn native_sdk_appkit_set_security_policy(host: *AppKitHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_appkit_set_menus(host: *AppKitHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
+extern fn native_sdk_appkit_set_global_hotkeys(host: *AppKitHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
 extern fn native_sdk_appkit_request_frame(host: *AppKitHost) void;
 extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) c_int;
 extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
@@ -740,6 +742,7 @@ pub const MacPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
+                .configure_global_hotkeys_fn = configureGlobalHotkeys,
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
@@ -828,6 +831,12 @@ pub const MacPlatform = struct {
             // reports honestly unsupported rather than half-implementing
             // a second player.
             .video_playback => self.web_engine == .system,
+            // System-wide hotkeys (Carbon RegisterEventHotKey against
+            // the process event dispatcher) live in the AppKit host;
+            // the Chromium host stubs the C ABI and reports honestly
+            // unsupported rather than half-registering chords whose
+            // events would have nowhere to land.
+            .global_hotkeys => self.web_engine == .system,
         };
     }
 
@@ -924,6 +933,14 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .key = event.shortcut_key[0..event.shortcut_key_len],
             .modifiers = shortcutModifiersFromFlags(event.shortcut_modifiers),
             .window_id = event.window_id,
+        } }),
+        // Same payload fields as a shortcut, minus the window: the host
+        // leaves `window_id` unset here because the chord fired while
+        // another app held focus.
+        .global_hotkey => state.emit(.{ .global_hotkey = .{
+            .id = event.shortcut_id[0..event.shortcut_id_len],
+            .key = event.shortcut_key[0..event.shortcut_key_len],
+            .modifiers = shortcutModifiersFromFlags(event.shortcut_modifiers),
         } }),
         .native_command => state.emit(.{ .native_command = .{
             .name = event.command_name[0..event.command_name_len],
@@ -2144,6 +2161,25 @@ fn configureShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shor
         modifiers[index] = shortcutModifierFlags(shortcut.modifiers);
     }
     native_sdk_appkit_set_shortcuts(self.host, ids[0..shortcuts.len].ptr, id_lens[0..shortcuts.len].ptr, keys[0..shortcuts.len].ptr, key_lens[0..shortcuts.len].ptr, modifiers[0..shortcuts.len].ptr, shortcuts.len);
+}
+
+fn configureGlobalHotkeys(context: ?*anyopaque, hotkeys: []const platform_mod.GlobalHotkey) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (hotkeys.len > platform_mod.max_global_hotkeys) return error.InvalidShortcut;
+    var ids: [platform_mod.max_global_hotkeys][*]const u8 = undefined;
+    var id_lens: [platform_mod.max_global_hotkeys]usize = undefined;
+    var keys: [platform_mod.max_global_hotkeys][*]const u8 = undefined;
+    var key_lens: [platform_mod.max_global_hotkeys]usize = undefined;
+    var modifiers: [platform_mod.max_global_hotkeys]u32 = undefined;
+    for (hotkeys, 0..) |hotkey, index| {
+        try platform_mod.validateGlobalHotkey(hotkey);
+        ids[index] = hotkey.id.ptr;
+        id_lens[index] = hotkey.id.len;
+        keys[index] = hotkey.key.ptr;
+        key_lens[index] = hotkey.key.len;
+        modifiers[index] = shortcutModifierFlags(hotkey.modifiers);
+    }
+    native_sdk_appkit_set_global_hotkeys(self.host, ids[0..hotkeys.len].ptr, id_lens[0..hotkeys.len].ptr, keys[0..hotkeys.len].ptr, key_lens[0..hotkeys.len].ptr, modifiers[0..hotkeys.len].ptr, hotkeys.len);
 }
 
 fn shortcutModifierFlags(modifiers: platform_mod.ShortcutModifiers) u32 {

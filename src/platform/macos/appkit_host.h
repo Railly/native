@@ -34,6 +34,10 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_AUDIO = 20,
     NATIVE_SDK_APPKIT_EVENT_VIDEO = 21,
     NATIVE_SDK_APPKIT_EVENT_VIEW_FOCUSED = 22,
+    /* A system-wide hotkey fired (Carbon RegisterEventHotKey). Reuses
+     * the shortcut payload fields, but window_id is meaningless here:
+     * the chord fired while some other app held the keyboard. */
+    NATIVE_SDK_APPKIT_EVENT_GLOBAL_HOTKEY = 23,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -413,6 +417,13 @@ void native_sdk_appkit_emit_window_event(native_sdk_appkit_host_t *host, uint64_
 void native_sdk_appkit_set_security_policy(native_sdk_appkit_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action);
 void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *const *menu_titles, const size_t *menu_title_lens, size_t menu_count, const uint32_t *item_menu_indices, const char *const *item_labels, const size_t *item_label_lens, const char *const *item_commands, const size_t *item_command_lens, const char *const *item_keys, const size_t *item_key_lens, const uint32_t *item_modifiers, const int *item_separators, const int *item_enabled, const int *item_checked, size_t item_count);
 void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
+/* Replace the app's system-wide hotkey registrations (the whole set per
+ * call, like set_shortcuts). Each chord is registered with Carbon
+ * against the process event dispatcher, so it fires with any app
+ * focused. A chord another app already owns is skipped rather than
+ * failing the call: which chords are free is a property of the running
+ * machine, not of this app. */
+void native_sdk_appkit_set_global_hotkeys(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
 int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
 // Content min-size floor for a created window (NSWindow contentMinSize):
 // the user's resize stops at the floor. Values <= 0 leave that axis at

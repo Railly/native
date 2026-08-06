@@ -2429,6 +2429,21 @@ void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char 
     [object setShortcutsWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
 }
 
+/* Accepted for ABI parity and ignored: this host reports
+ * `global_hotkeys` unsupported (see macos/root.zig supportsFeature), so
+ * registering chords here would claim them system-wide with no handler
+ * able to deliver the events. The runtime's feature gate is the honest
+ * refusal; this is the symbol the shared extern needs to link. */
+void native_sdk_appkit_set_global_hotkeys(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
+    (void)host;
+    (void)ids;
+    (void)id_lens;
+    (void)keys;
+    (void)key_lens;
+    (void)modifiers;
+    (void)count;
+}
+
 int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     // Accepted for ABI parity; see native_sdk_appkit_create.
     (void)show_policy;

@@ -1124,7 +1124,12 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
-                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
+                // Same reason as the chromium branch below: the SDK's
+                // usr/include must stay a SYSTEM include dir. A plain -I
+                // makes clang audit those headers as user code, and
+                // HIToolbox (the global-hotkey API) reaches <signal.h>,
+                // which then floods with nullability diagnostics.
+                const sdk_include = if (b.sysroot) |sysroot| b.fmt("-isystem{s}/usr/include", .{sysroot}) else "";
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
                 app_mod.linkFramework("WebKit", .{});
@@ -1152,8 +1157,19 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         }
         if (b.sysroot) |sysroot| {
             app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+            // Carbon's subframeworks, where HIToolbox lives: the AppKit
+            // host includes <HIToolbox/CarbonEvents.h> directly rather
+            // than the Carbon umbrella (which drags in deprecated
+            // QuickDraw headers), and that path is not reachable from
+            // the top-level framework dir alone.
+            app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks/Carbon.framework/Frameworks" }) });
         }
         app_mod.linkFramework("AppKit", .{});
+        // System-wide hotkeys: RegisterEventHotKey is the one macOS API
+        // that delivers a chord to an unfocused app without demanding
+        // the Accessibility permission a CGEventTap would, and it has no
+        // AppKit replacement.
+        app_mod.linkFramework("Carbon", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
         // CVPixelBuffer for the video frame path (the video player's

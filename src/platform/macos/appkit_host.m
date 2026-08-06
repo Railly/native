@@ -12,6 +12,23 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <WebKit/WebKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+/* System-wide hotkeys. Carbon's RegisterEventHotKey is the only macOS
+ * API that delivers a chord to an unfocused app WITHOUT the
+ * Accessibility permission a CGEventTap would demand: the registration
+ * is process-scoped and the OS routes the chord to the owning process.
+ * The rest of Carbon is deprecated, but this call has no AppKit
+ * replacement and remains supported.
+ *
+ * These two HIToolbox headers specifically, NOT the <Carbon/Carbon.h>
+ * umbrella: the umbrella drags in CarbonCore's Script.h and QuickDraw's
+ * ColorSyncDeprecated.h, whose 10.5/10.6-era symbols trip this build's
+ * deprecation-as-error flags by the hundred. CarbonEvents.h carries the
+ * hotkey API and Events.h the kVK_* keycodes, and neither pulls the
+ * deprecated surface, so no diagnostic suppression is needed.
+ * The subframework dir is on the framework search path (see the macOS
+ * block in build/app.zig). */
+#import <HIToolbox/CarbonEvents.h>
+#import <HIToolbox/Events.h>
 #import <CoreText/CoreText.h>
 #import <ImageIO/ImageIO.h>
 #import <dispatch/dispatch.h>
@@ -60,6 +77,9 @@ static NSArray<NSString *> *NativeSdkPolicyListFromBytes(const char *bytes, size
 static NSString *NativeSdkOriginForURL(NSURL *url);
 static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url);
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event);
+static OSStatus NativeSdkGlobalHotkeyHandler(EventHandlerCallRef nextHandler, EventRef theEvent, void *userData);
+static uint32_t NativeSdkCarbonKeyCodeForShortcutKey(NSString *key);
+static UInt32 NativeSdkCarbonModifiersForShortcutModifiers(uint32_t modifiers);
 static BOOL NativeSdkTextNavigationNeedsRawKeyEvent(NSEvent *event);
 static BOOL NativeSdkShortcutUsesImplicitShift(NSString *key, NSEvent *event);
 static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
@@ -700,6 +720,18 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+/* A live Carbon registration. `ref` is the token RegisterEventHotKey
+ * handed back and is what UnregisterEventHotKey needs at teardown;
+ * `hotKeyId` is the small integer the fired event carries, which is how
+ * the handler finds its way back to this declaration's id and key. */
+@interface NativeSdkGlobalHotkey : NSObject
+@property(nonatomic, strong) NSString *identifier;
+@property(nonatomic, strong) NSString *key;
+@property(nonatomic, assign) uint32_t modifiers;
+@property(nonatomic, assign) EventHotKeyRef ref;
+@property(nonatomic, assign) uint32_t hotKeyId;
+@end
+
 @interface NativeSdkAppKitHost : NSObject <WKNavigationDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
@@ -916,6 +948,13 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) id willTerminateObserver;
 @property(nonatomic, strong) dispatch_source_t sigtermSource;
 @property(nonatomic, strong) NSArray<NativeSdkShortcut *> *shortcuts;
+/* Live Carbon registrations, keyed by the hot key id the fired event
+ * carries. The dictionary IS the ownership: removing an entry is
+ * preceded by UnregisterEventHotKey, so a chord is never left claimed
+ * with no handler able to explain it. */
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkGlobalHotkey *> *globalHotkeys;
+@property(nonatomic, assign) EventHandlerRef globalHotkeyHandler;
+@property(nonatomic, assign) uint32_t nextGlobalHotkeyId;
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
@@ -1073,6 +1112,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)completeBridgeWithResponse:(NSString *)response windowId:(uint64_t)windowId webViewLabel:(NSString *)webViewLabel;
 - (void)emitEventNamed:(NSString *)name detailJSON:(NSString *)detailJSON windowId:(uint64_t)windowId;
 - (void)setShortcutsWithIds:(const char *const *)ids idLengths:(const size_t *)idLengths keys:(const char *const *)keys keyLengths:(const size_t *)keyLengths modifiers:(const uint32_t *)modifiers count:(size_t)count;
+- (void)setGlobalHotkeysWithIds:(const char *const *)ids idLengths:(const size_t *)idLengths keys:(const char *const *)keys keyLengths:(const size_t *)keyLengths modifiers:(const uint32_t *)modifiers count:(size_t)count;
+- (void)emitGlobalHotkeyWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers;
+- (void)unregisterAllGlobalHotkeys;
+- (void)teardownGlobalHotkeyHandler;
 - (BOOL)handleShortcutEvent:(NSEvent *)event;
 - (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event;
 @end
@@ -7277,6 +7320,9 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 @implementation NativeSdkShortcut
 @end
 
+@implementation NativeSdkGlobalHotkey
+@end
+
 @implementation NativeSdkAppKitHost
 
 - (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
@@ -7564,6 +7610,10 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
     }
+    // A Carbon registration outlives the object unless it is explicitly
+    // dropped, and a leaked one keeps the chord claimed for the whole
+    // process with no handler left to explain it.
+    [self teardownGlobalHotkeyHandler];
     if (self.viewFocusEventMonitor) {
         [NSEvent removeMonitor:self.viewFocusEventMonitor];
         self.viewFocusEventMonitor = nil;
@@ -9387,6 +9437,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
     }
+    [self teardownGlobalHotkeyHandler];
     if (self.viewFocusEventMonitor) {
         [NSEvent removeMonitor:self.viewFocusEventMonitor];
         self.viewFocusEventMonitor = nil;
@@ -11377,6 +11428,98 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     self.shortcuts = items;
 }
 
+- (void)emitGlobalHotkeyWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers {
+    const char *identifierBytes = identifier.UTF8String ? identifier.UTF8String : "";
+    const char *keyBytes = key.UTF8String ? key.UTF8String : "";
+    /* No window_id: the chord fired while another app held focus, so
+     * there is no window of ours to name. The Zig demux reads only the
+     * shortcut_* payload fields for this kind. */
+    [self emitEvent:(native_sdk_appkit_event_t){
+        .kind = NATIVE_SDK_APPKIT_EVENT_GLOBAL_HOTKEY,
+        .shortcut_id = identifierBytes,
+        .shortcut_id_len = [identifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .shortcut_key = keyBytes,
+        .shortcut_key_len = [key lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+        .shortcut_modifiers = modifiers,
+    }];
+}
+
+- (void)unregisterAllGlobalHotkeys {
+    for (NSNumber *key in self.globalHotkeys) {
+        NativeSdkGlobalHotkey *hotkey = self.globalHotkeys[key];
+        if (hotkey.ref) UnregisterEventHotKey(hotkey.ref);
+    }
+    [self.globalHotkeys removeAllObjects];
+}
+
+- (void)setGlobalHotkeysWithIds:(const char *const *)ids idLengths:(const size_t *)idLengths keys:(const char *const *)keys keyLengths:(const size_t *)keyLengths modifiers:(const uint32_t *)modifiers count:(size_t)count {
+    if (!self.globalHotkeys) self.globalHotkeys = [[NSMutableDictionary alloc] init];
+
+    /* Whole-set replacement: drop every live claim first so a chord
+     * removed from the manifest stops being owned by this process. */
+    [self unregisterAllGlobalHotkeys];
+
+    if (count == 0) {
+        [self teardownGlobalHotkeyHandler];
+        return;
+    }
+
+    /* One process-wide handler serves every registration; install it
+     * lazily so an app that declares no hotkeys pays nothing. The
+     * dispatcher target is what makes this global: the event arrives
+     * regardless of which app is frontmost. */
+    if (!self.globalHotkeyHandler) {
+        EventTypeSpec spec;
+        spec.eventClass = kEventClassKeyboard;
+        spec.eventKind = kEventHotKeyPressed;
+        EventHandlerRef handlerRef = NULL;
+        OSStatus status = InstallEventHandler(GetEventDispatcherTarget(), NativeSdkGlobalHotkeyHandler, 1, &spec, (__bridge void *)self, &handlerRef);
+        if (status != noErr) return;
+        self.globalHotkeyHandler = handlerRef;
+    }
+
+    for (size_t index = 0; index < count; index++) {
+        NSString *identifier = ids[index] ? [[NSString alloc] initWithBytes:ids[index] length:idLengths[index] encoding:NSUTF8StringEncoding] : @"";
+        NSString *key = keys[index] ? [[NSString alloc] initWithBytes:keys[index] length:keyLengths[index] encoding:NSUTF8StringEncoding] : @"";
+        if (identifier.length == 0 || key.length == 0) continue;
+
+        uint32_t keyCode = NativeSdkCarbonKeyCodeForShortcutKey(key);
+        if (keyCode == UINT32_MAX) continue;
+
+        uint32_t hotKeyId = ++self.nextGlobalHotkeyId;
+        EventHotKeyID carbonId;
+        carbonId.signature = 'nsdk';
+        carbonId.id = hotKeyId;
+        EventHotKeyRef ref = NULL;
+        OSStatus status = RegisterEventHotKey(keyCode,
+                                              NativeSdkCarbonModifiersForShortcutModifiers(modifiers[index]),
+                                              carbonId,
+                                              GetEventDispatcherTarget(),
+                                              0,
+                                              &ref);
+        /* A chord another app already owns answers non-noErr. That is a
+         * fact about the running machine, not an app defect, so the
+         * remaining declarations still register. */
+        if (status != noErr || !ref) continue;
+
+        NativeSdkGlobalHotkey *hotkey = [[NativeSdkGlobalHotkey alloc] init];
+        hotkey.identifier = identifier;
+        hotkey.key = key.lowercaseString;
+        hotkey.modifiers = modifiers[index];
+        hotkey.ref = ref;
+        hotkey.hotKeyId = hotKeyId;
+        self.globalHotkeys[@(hotKeyId)] = hotkey;
+    }
+}
+
+- (void)teardownGlobalHotkeyHandler {
+    [self unregisterAllGlobalHotkeys];
+    if (self.globalHotkeyHandler) {
+        RemoveEventHandler(self.globalHotkeyHandler);
+        self.globalHotkeyHandler = NULL;
+    }
+}
+
 /* The standard About panel, populated explicitly so unbundled dev runs
  * show the same identity a packaged bundle reads from Info.plist: the
  * display name, the app.zon version, and the description as the
@@ -11563,6 +11706,60 @@ static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event) {
         case '~': return @"`";
         default: return characters.lowercaseString;
     }
+}
+
+/* The inverse of NativeSdkShortcutKeyForEvent for the Carbon hotkey API,
+ * which addresses keys by virtual keycode rather than by character.
+ * The key vocabulary is identical to the local-shortcut one (same
+ * app.zon spelling means the same physical key whether it is declared
+ * local or global); this table just names the ANSI/JIS keycodes for it.
+ * Returns UINT32_MAX for a key this host cannot register, which the
+ * caller reports as a skipped registration rather than a crash. */
+static uint32_t NativeSdkCarbonKeyCodeForShortcutKey(NSString *key) {
+    if (key.length == 0) return UINT32_MAX;
+    static NSDictionary<NSString *, NSNumber *> *table = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        table = @{
+            @"a" : @(kVK_ANSI_A), @"b" : @(kVK_ANSI_B), @"c" : @(kVK_ANSI_C), @"d" : @(kVK_ANSI_D),
+            @"e" : @(kVK_ANSI_E), @"f" : @(kVK_ANSI_F), @"g" : @(kVK_ANSI_G), @"h" : @(kVK_ANSI_H),
+            @"i" : @(kVK_ANSI_I), @"j" : @(kVK_ANSI_J), @"k" : @(kVK_ANSI_K), @"l" : @(kVK_ANSI_L),
+            @"m" : @(kVK_ANSI_M), @"n" : @(kVK_ANSI_N), @"o" : @(kVK_ANSI_O), @"p" : @(kVK_ANSI_P),
+            @"q" : @(kVK_ANSI_Q), @"r" : @(kVK_ANSI_R), @"s" : @(kVK_ANSI_S), @"t" : @(kVK_ANSI_T),
+            @"u" : @(kVK_ANSI_U), @"v" : @(kVK_ANSI_V), @"w" : @(kVK_ANSI_W), @"x" : @(kVK_ANSI_X),
+            @"y" : @(kVK_ANSI_Y), @"z" : @(kVK_ANSI_Z),
+            @"0" : @(kVK_ANSI_0), @"1" : @(kVK_ANSI_1), @"2" : @(kVK_ANSI_2), @"3" : @(kVK_ANSI_3),
+            @"4" : @(kVK_ANSI_4), @"5" : @(kVK_ANSI_5), @"6" : @(kVK_ANSI_6), @"7" : @(kVK_ANSI_7),
+            @"8" : @(kVK_ANSI_8), @"9" : @(kVK_ANSI_9),
+            @"=" : @(kVK_ANSI_Equal), @"-" : @(kVK_ANSI_Minus), @"," : @(kVK_ANSI_Comma),
+            @"." : @(kVK_ANSI_Period), @"/" : @(kVK_ANSI_Slash), @";" : @(kVK_ANSI_Semicolon),
+            @"'" : @(kVK_ANSI_Quote), @"[" : @(kVK_ANSI_LeftBracket), @"]" : @(kVK_ANSI_RightBracket),
+            @"\\" : @(kVK_ANSI_Backslash), @"`" : @(kVK_ANSI_Grave),
+            @"space" : @(kVK_Space), @"enter" : @(kVK_Return), @"tab" : @(kVK_Tab),
+            @"escape" : @(kVK_Escape), @"backspace" : @(kVK_Delete), @"delete" : @(kVK_ForwardDelete),
+            @"home" : @(kVK_Home), @"end" : @(kVK_End), @"pageup" : @(kVK_PageUp),
+            @"pagedown" : @(kVK_PageDown), @"insert" : @(kVK_Help),
+            @"arrowup" : @(kVK_UpArrow), @"arrowdown" : @(kVK_DownArrow),
+            @"arrowleft" : @(kVK_LeftArrow), @"arrowright" : @(kVK_RightArrow),
+            @"f1" : @(kVK_F1), @"f2" : @(kVK_F2), @"f3" : @(kVK_F3), @"f4" : @(kVK_F4),
+            @"f5" : @(kVK_F5), @"f6" : @(kVK_F6), @"f7" : @(kVK_F7), @"f8" : @(kVK_F8),
+            @"f9" : @(kVK_F9), @"f10" : @(kVK_F10), @"f11" : @(kVK_F11), @"f12" : @(kVK_F12),
+        };
+    });
+    NSNumber *code = table[key.lowercaseString];
+    return code ? (uint32_t)code.unsignedIntValue : UINT32_MAX;
+}
+
+/* The app's modifier bitmask translated to Carbon's. `primary` is the
+ * platform's own primary chord modifier, which on macOS is Command —
+ * the same resolution the menu and shortcut paths apply. */
+static UInt32 NativeSdkCarbonModifiersForShortcutModifiers(uint32_t modifiers) {
+    UInt32 carbon = 0;
+    if (modifiers & (NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand)) carbon |= cmdKey;
+    if (modifiers & NativeSdkShortcutModifierShift) carbon |= shiftKey;
+    if (modifiers & NativeSdkShortcutModifierOption) carbon |= optionKey;
+    if (modifiers & NativeSdkShortcutModifierControl) carbon |= controlKey;
+    return carbon;
 }
 
 static BOOL NativeSdkTextNavigationNeedsRawKeyEvent(NSEvent *event) {
@@ -11931,6 +12128,31 @@ void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *con
 void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     [object setShortcutsWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
+}
+
+/* Carbon delivers the fired chord here on the main run loop, whichever
+ * app is frontmost. The event carries only the small id we registered,
+ * so the live registration table is what turns it back into the app's
+ * declared id and key. */
+static OSStatus NativeSdkGlobalHotkeyHandler(EventHandlerCallRef nextHandler, EventRef theEvent, void *userData) {
+    (void)nextHandler;
+    NativeSdkAppKitHost *host = (__bridge NativeSdkAppKitHost *)userData;
+    if (!host) return eventNotHandledErr;
+
+    EventHotKeyID carbonId;
+    OSStatus status = GetEventParameter(theEvent, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(carbonId), NULL, &carbonId);
+    if (status != noErr) return status;
+
+    NativeSdkGlobalHotkey *hotkey = host.globalHotkeys[@(carbonId.id)];
+    if (!hotkey) return eventNotHandledErr;
+
+    [host emitGlobalHotkeyWithId:hotkey.identifier key:hotkey.key modifiers:hotkey.modifiers];
+    return noErr;
+}
+
+void native_sdk_appkit_set_global_hotkeys(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    [object setGlobalHotkeysWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
 }
 
 int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
