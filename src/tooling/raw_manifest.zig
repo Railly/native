@@ -28,6 +28,7 @@ pub const RawManifest = struct {
     commands: []const RawCommand = &.{},
     menus: []const RawMenu = &.{},
     shortcuts: []const RawShortcut = &.{},
+    global_hotkeys: []const RawShortcut = &.{},
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
 };

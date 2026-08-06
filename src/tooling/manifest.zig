@@ -51,6 +51,7 @@ pub const Metadata = struct {
     commands: []const CommandMetadata = &.{},
     menus: []const MenuMetadata = &.{},
     shortcuts: []const ShortcutMetadata = &.{},
+    global_hotkeys: []const ShortcutMetadata = &.{},
     file_associations: []const FileAssociationMetadata = &.{},
     url_schemes: []const UrlSchemeMetadata = &.{},
 
@@ -171,6 +172,13 @@ pub const Metadata = struct {
             if (shortcut.modifiers.len > 0) allocator.free(shortcut.modifiers);
         }
         if (self.shortcuts.len > 0) allocator.free(self.shortcuts);
+        for (self.global_hotkeys) |hotkey| {
+            allocator.free(hotkey.id);
+            allocator.free(hotkey.key);
+            for (hotkey.modifiers) |value| allocator.free(value);
+            if (hotkey.modifiers.len > 0) allocator.free(hotkey.modifiers);
+        }
+        if (self.global_hotkeys.len > 0) allocator.free(self.global_hotkeys);
         for (self.file_associations) |association| {
             allocator.free(association.name);
             allocator.free(association.role);
@@ -429,6 +437,8 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer deinitParsedMenus(allocator, menus);
     const shortcuts = parseShortcuts(allocator, metadata.shortcuts) catch return .{ .ok = false, .message = "app.zon shortcuts are invalid" };
     defer allocator.free(shortcuts);
+    const global_hotkeys = parseGlobalHotkeys(allocator, metadata.global_hotkeys) catch return .{ .ok = false, .message = "app.zon global hotkeys are invalid" };
+    defer allocator.free(global_hotkeys);
     const file_associations = parseFileAssociations(allocator, metadata.file_associations) catch return .{ .ok = false, .message = "app.zon file associations are invalid" };
     defer allocator.free(file_associations);
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app.zon URL schemes are invalid" };
@@ -458,6 +468,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .commands = commands,
         .menus = menus,
         .shortcuts = shortcuts,
+        .global_hotkeys = global_hotkeys,
         .file_associations = file_associations,
         .url_schemes = url_schemes,
         .cef = .{ .dir = metadata.cef.dir, .auto_install = metadata.cef.auto_install },
@@ -537,6 +548,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .commands = try convertRawCommands(allocator, raw.commands),
         .menus = try convertRawMenus(allocator, raw.menus),
         .shortcuts = try convertRawShortcuts(allocator, raw.shortcuts),
+        .global_hotkeys = try convertRawShortcuts(allocator, raw.global_hotkeys),
         .file_associations = try convertRawFileAssociations(allocator, raw.file_associations),
         .url_schemes = try convertRawUrlSchemes(allocator, raw.url_schemes),
     };
@@ -1126,6 +1138,7 @@ fn parseCapability(value: []const u8) !app_manifest.Capability {
     if (std.mem.eql(u8, value, "gpu_surfaces")) return .gpu_surfaces;
     if (std.mem.eql(u8, value, "menus")) return .menus;
     if (std.mem.eql(u8, value, "shortcuts")) return .shortcuts;
+    if (std.mem.eql(u8, value, "global_hotkeys")) return .global_hotkeys;
     if (std.mem.eql(u8, value, "tray")) return .tray;
     if (std.mem.eql(u8, value, "filesystem")) return .filesystem;
     if (std.mem.eql(u8, value, "network")) return .network;
@@ -1168,6 +1181,20 @@ fn parseShortcuts(allocator: std.mem.Allocator, values: []const ShortcutMetadata
         });
     }
     return shortcuts.toOwnedSlice(allocator);
+}
+
+fn parseGlobalHotkeys(allocator: std.mem.Allocator, values: []const ShortcutMetadata) ![]const app_manifest.GlobalHotkey {
+    if (values.len == 0) return &.{};
+    var hotkeys: std.ArrayList(app_manifest.GlobalHotkey) = .empty;
+    errdefer hotkeys.deinit(allocator);
+    for (values) |value| {
+        try hotkeys.append(allocator, .{
+            .id = value.id,
+            .key = value.key,
+            .modifiers = try parseShortcutModifiers(value.modifiers),
+        });
+    }
+    return hotkeys.toOwnedSlice(allocator);
 }
 
 fn parseCommands(allocator: std.mem.Allocator, values: []const CommandMetadata) ![]const app_manifest.Command {

@@ -2195,6 +2195,7 @@ fn runnerZig() []const u8 {
     \\const app_manifest = @import("app_manifest_zon");
     \\const manifest_commands = if (@hasField(@TypeOf(app_manifest), "commands")) app_manifest.commands else .{};
     \\const manifest_shortcuts = if (@hasField(@TypeOf(app_manifest), "shortcuts")) app_manifest.shortcuts else .{};
+    \\const manifest_global_hotkeys = if (@hasField(@TypeOf(app_manifest), "global_hotkeys")) app_manifest.global_hotkeys else .{};
     \\const manifest_menus = if (@hasField(@TypeOf(app_manifest), "menus")) app_manifest.menus else .{};
     \\const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
     \\
@@ -2225,6 +2226,7 @@ fn runnerZig() []const u8 {
     \\    commands: ?[]const native_sdk.Command = null,
     \\    menus: ?[]const native_sdk.Menu = null,
     \\    shortcuts: ?[]const native_sdk.Shortcut = null,
+    \\    global_hotkeys: ?[]const native_sdk.GlobalHotkey = null,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
     \\        var info: native_sdk.AppInfo = .{
@@ -2269,6 +2271,10 @@ fn runnerZig() []const u8 {
     \\
     \\    fn resolvedShortcuts(self: RunOptions, storage: *ShortcutStorage) []const native_sdk.Shortcut {
     \\        return self.shortcuts orelse storage.fromManifest();
+    \\    }
+    \\
+    \\    fn resolvedGlobalHotkeys(self: RunOptions, storage: *GlobalHotkeyStorage) []const native_sdk.GlobalHotkey {
+    \\        return self.global_hotkeys orelse storage.fromManifest();
     \\    }
     \\
     \\    fn resolvedCommands(self: RunOptions, storage: *CommandStorage) []const native_sdk.Command {
@@ -2356,6 +2362,27 @@ fn runnerZig() []const u8 {
     \\            };
     \\        }
     \\        return self.shortcuts[0..manifest_shortcuts.len];
+    \\    }
+    \\};
+    \\
+    \\const GlobalHotkeyStorage = struct {
+    \\    global_hotkeys: [native_sdk.platform.max_global_hotkeys]native_sdk.GlobalHotkey = undefined,
+    \\
+    \\    fn fromManifest(self: *GlobalHotkeyStorage) []const native_sdk.GlobalHotkey {
+    \\        comptime {
+    \\            if (manifest_global_hotkeys.len > native_sdk.platform.max_global_hotkeys) {
+    \\                @compileError("app.zon defines too many global hotkeys");
+    \\            }
+    \\        }
+    \\
+    \\        inline for (manifest_global_hotkeys, 0..) |hotkey, index| {
+    \\            self.global_hotkeys[index] = .{
+    \\                .id = hotkey.id,
+    \\                .key = hotkey.key,
+    \\                .modifiers = shortcutModifiers(hotkey),
+    \\            };
+    \\        }
+    \\        return self.global_hotkeys[0..manifest_global_hotkeys.len];
     \\    }
     \\};
     \\
@@ -2630,6 +2657,8 @@ fn runnerZig() []const u8 {
     \\    }
     \\    var shortcut_storage: ShortcutStorage = .{};
     \\    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    \\    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    \\    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     \\    var menu_storage: MenuStorage = .{};
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
@@ -2650,6 +2679,7 @@ fn runnerZig() []const u8 {
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
+    \\        .global_hotkeys = global_hotkeys,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .environ = init.minimal.environ,
@@ -2684,6 +2714,8 @@ fn runnerZig() []const u8 {
     \\    }
     \\    var shortcut_storage: ShortcutStorage = .{};
     \\    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    \\    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    \\    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     \\    var menu_storage: MenuStorage = .{};
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
@@ -2704,6 +2736,7 @@ fn runnerZig() []const u8 {
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
+    \\        .global_hotkeys = global_hotkeys,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .environ = init.minimal.environ,
@@ -2738,6 +2771,8 @@ fn runnerZig() []const u8 {
     \\    }
     \\    var shortcut_storage: ShortcutStorage = .{};
     \\    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    \\    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    \\    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     \\    var menu_storage: MenuStorage = .{};
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
@@ -2758,6 +2793,7 @@ fn runnerZig() []const u8 {
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
+    \\        .global_hotkeys = global_hotkeys,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .environ = init.minimal.environ,
@@ -2792,6 +2828,8 @@ fn runnerZig() []const u8 {
     \\    }
     \\    var shortcut_storage: ShortcutStorage = .{};
     \\    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    \\    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    \\    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     \\    var menu_storage: MenuStorage = .{};
     \\    const menus = options.resolvedMenus(&menu_storage);
     \\    var command_storage: CommandStorage = .{};
@@ -2812,6 +2850,7 @@ fn runnerZig() []const u8 {
     \\        .commands = commands,
     \\        .menus = menus,
     \\        .shortcuts = shortcuts,
+    \\        .global_hotkeys = global_hotkeys,
     \\        .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
     \\        .window_state_store = store,
     \\        .environ = init.minimal.environ,

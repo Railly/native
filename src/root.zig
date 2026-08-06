@@ -164,6 +164,7 @@ pub const WindowClosePolicy = platform.WindowClosePolicy;
 pub const Menu = platform.Menu;
 pub const MenuItem = platform.MenuItem;
 pub const Shortcut = platform.Shortcut;
+pub const GlobalHotkey = platform.GlobalHotkey;
 pub const ShortcutModifiers = platform.ShortcutModifiers;
 pub const ShortcutEvent = platform.ShortcutEvent;
 pub const TimerEvent = platform.TimerEvent;

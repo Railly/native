@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const native_sdk = @import("native_sdk");
 const app_manifest = @import("app_manifest_zon");
 const manifest_shortcuts = if (@hasField(@TypeOf(app_manifest), "shortcuts")) app_manifest.shortcuts else .{};
+const manifest_global_hotkeys = if (@hasField(@TypeOf(app_manifest), "global_hotkeys")) app_manifest.global_hotkeys else .{};
 const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
 
 pub const StdoutTraceSink = struct {
@@ -52,6 +53,7 @@ pub const RunOptions = struct {
     security: native_sdk.SecurityPolicy = .{},
     menus: []const native_sdk.Menu = &.{},
     shortcuts: ?[]const native_sdk.Shortcut = null,
+    global_hotkeys: ?[]const native_sdk.GlobalHotkey = null,
 
     fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
         var info: native_sdk.AppInfo = .{
@@ -111,6 +113,10 @@ pub const RunOptions = struct {
     fn resolvedShortcuts(self: RunOptions, storage: *ShortcutStorage) []const native_sdk.Shortcut {
         return self.shortcuts orelse storage.fromManifest();
     }
+
+    fn resolvedGlobalHotkeys(self: RunOptions, storage: *GlobalHotkeyStorage) []const native_sdk.GlobalHotkey {
+        return self.global_hotkeys orelse storage.fromManifest();
+    }
 };
 
 const ShortcutStorage = struct {
@@ -131,6 +137,27 @@ const ShortcutStorage = struct {
             };
         }
         return self.shortcuts[0..manifest_shortcuts.len];
+    }
+};
+
+const GlobalHotkeyStorage = struct {
+    global_hotkeys: [native_sdk.platform.max_global_hotkeys]native_sdk.GlobalHotkey = undefined,
+
+    fn fromManifest(self: *GlobalHotkeyStorage) []const native_sdk.GlobalHotkey {
+        comptime {
+            if (manifest_global_hotkeys.len > native_sdk.platform.max_global_hotkeys) {
+                @compileError("app.zon defines too many global hotkeys");
+            }
+        }
+
+        inline for (manifest_global_hotkeys, 0..) |hotkey, index| {
+            self.global_hotkeys[index] = .{
+                .id = hotkey.id,
+                .key = hotkey.key,
+                .modifiers = shortcutModifiers(hotkey),
+            };
+        }
+        return self.global_hotkeys[0..manifest_global_hotkeys.len];
     }
 };
 
@@ -500,6 +527,8 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -521,6 +550,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .security = options.security,
         .menus = options.menus,
         .shortcuts = shortcuts,
+        .global_hotkeys = global_hotkeys,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
@@ -564,6 +594,8 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -585,6 +617,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .security = options.security,
         .menus = options.menus,
         .shortcuts = shortcuts,
+        .global_hotkeys = global_hotkeys,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
@@ -625,6 +658,8 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -646,6 +681,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .security = options.security,
         .menus = options.menus,
         .shortcuts = shortcuts,
+        .global_hotkeys = global_hotkeys,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
@@ -685,6 +721,8 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var global_hotkey_storage: GlobalHotkeyStorage = .{};
+    const global_hotkeys = options.resolvedGlobalHotkeys(&global_hotkey_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -706,6 +744,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .security = options.security,
         .menus = options.menus,
         .shortcuts = shortcuts,
+        .global_hotkeys = global_hotkeys,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
         .environ = init.minimal.environ,
