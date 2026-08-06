@@ -33,6 +33,12 @@ pub const ValidationError = error{
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
 pub const max_shortcut_key_bytes: usize = 32;
+/// Global hotkeys are a scarcer resource than local shortcuts: each one
+/// claims a chord from the whole system, and the OS refuses a
+/// registration another app already holds. The lower ceiling reflects
+/// that an app with dozens of system-wide claims is hijacking the
+/// machine, not configuring itself.
+pub const max_global_hotkeys: usize = 16;
 pub const max_shell_windows: usize = 16;
 pub const max_shell_views_per_window: usize = 128;
 pub const max_view_label_bytes: usize = 64;
@@ -152,6 +158,7 @@ pub const CapabilityKind = enum {
     gpu_surfaces,
     menus,
     shortcuts,
+    global_hotkeys,
     tray,
     filesystem,
     network,
@@ -177,6 +184,7 @@ pub const Capability = union(CapabilityKind) {
     gpu_surfaces: void,
     menus: void,
     shortcuts: void,
+    global_hotkeys: void,
     tray: void,
     filesystem: void,
     network: void,
@@ -568,6 +576,20 @@ pub const Shortcut = struct {
     modifiers: ShortcutModifiers = .{},
 };
 
+/// A system-wide hotkey: it fires while ANY app holds focus, including
+/// when this app is hidden or has no window at all. That reach is the
+/// whole difference from `Shortcut`, which only fires when one of the
+/// app's own windows is key — and it is why a hotkey carries no
+/// `window_id` through to its event (there is no focused window to
+/// name) and why the key must be modifier-guarded even harder than a
+/// local shortcut: a bare "r" registered globally would swallow that
+/// keystroke from every other app on the machine.
+pub const GlobalHotkey = struct {
+    id: []const u8,
+    key: []const u8,
+    modifiers: ShortcutModifiers = .{},
+};
+
 pub const Command = struct {
     id: []const u8,
     title: []const u8 = "",
@@ -640,6 +662,7 @@ pub const Manifest = struct {
     commands: []const Command = &.{},
     menus: []const Menu = &.{},
     shortcuts: []const Shortcut = &.{},
+    global_hotkeys: []const GlobalHotkey = &.{},
     file_associations: []const FileAssociation = &.{},
     url_schemes: []const UrlScheme = &.{},
     cef: CefConfig = .{},

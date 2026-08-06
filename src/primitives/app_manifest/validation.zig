@@ -6,6 +6,7 @@ const ValidationError = types.ValidationError;
 const max_shortcuts = types.max_shortcuts;
 const max_shortcut_id_bytes = types.max_shortcut_id_bytes;
 const max_shortcut_key_bytes = types.max_shortcut_key_bytes;
+const max_global_hotkeys = types.max_global_hotkeys;
 const max_shell_windows = types.max_shell_windows;
 const max_shell_views_per_window = types.max_shell_views_per_window;
 const max_view_label_bytes = types.max_view_label_bytes;
@@ -59,6 +60,7 @@ const ShellWindow = types.ShellWindow;
 const ShellConfig = types.ShellConfig;
 const ShortcutModifiers = types.ShortcutModifiers;
 const Shortcut = types.Shortcut;
+const GlobalHotkey = types.GlobalHotkey;
 const Command = types.Command;
 const Menu = types.Menu;
 const MenuItem = types.MenuItem;
@@ -83,6 +85,7 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateCommands(manifest.commands);
     try validateMenus(manifest.menus);
     try validateShortcutsForPlatforms(manifest.shortcuts, manifest.platforms);
+    try validateGlobalHotkeys(manifest.global_hotkeys);
     try validateFileAssociations(manifest.file_associations);
     try validateUrlSchemes(manifest.url_schemes);
     try validateCefConfig(manifest.package.web_engine, manifest.cef);
@@ -387,6 +390,31 @@ pub fn validateShortcutsForPlatforms(shortcuts: []const Shortcut, platforms: []c
         for (shortcuts[0..i]) |previous| {
             if (std.mem.eql(u8, previous.id, shortcut.id)) return error.DuplicateShortcut;
             if (std.ascii.eqlIgnoreCase(previous.key, shortcut.key) and shortcutModifiersCollide(previous.modifiers, shortcut.modifiers, platforms)) return error.DuplicateShortcut;
+        }
+    }
+}
+
+/// Global hotkeys validate harder than local shortcuts on one axis: a
+/// local shortcut may go bare when the key is not a text key (F5, Escape
+/// — typing them into the app's own field is not a thing), but a GLOBAL
+/// claim on a bare key steals that key from every other app on the
+/// machine, function keys included. So EVERY global hotkey must carry at
+/// least one modifier, regardless of key kind. Ids and keys reuse the
+/// shortcut bounds and grammar, and the duplicate rules are the shortcut
+/// rules with the platform-collision resolution dropped: a hotkey chord
+/// is registered with the OS as written, so two entries that differ only
+/// by `primary`-vs-`command` are two distinct system claims, not a
+/// collision to reject at authoring time.
+pub fn validateGlobalHotkeys(hotkeys: []const GlobalHotkey) ValidationError!void {
+    if (hotkeys.len > max_global_hotkeys) return error.InvalidShortcut;
+    for (hotkeys, 0..) |hotkey, i| {
+        if (hotkey.id.len > max_shortcut_id_bytes) return error.InvalidShortcut;
+        try validateName(hotkey.id);
+        try validateShortcutKey(hotkey.key);
+        if (!shortcutModifiersHasAny(hotkey.modifiers)) return error.InvalidShortcut;
+        for (hotkeys[0..i]) |previous| {
+            if (std.mem.eql(u8, previous.id, hotkey.id)) return error.DuplicateShortcut;
+            if (std.ascii.eqlIgnoreCase(previous.key, hotkey.key) and shortcutModifiersEql(previous.modifiers, hotkey.modifiers)) return error.DuplicateShortcut;
         }
     }
 }
