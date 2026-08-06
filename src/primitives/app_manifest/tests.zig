@@ -4,6 +4,7 @@ const validation = @import("validation.zig");
 
 const ValidationError = types.ValidationError;
 const max_shortcuts = types.max_shortcuts;
+const max_global_hotkeys = types.max_global_hotkeys;
 const max_shortcut_id_bytes = types.max_shortcut_id_bytes;
 const max_shortcut_key_bytes = types.max_shortcut_key_bytes;
 const max_shell_windows = types.max_shell_windows;
@@ -59,6 +60,7 @@ const ShellWindow = types.ShellWindow;
 const ShellConfig = types.ShellConfig;
 const ShortcutModifiers = types.ShortcutModifiers;
 const Shortcut = types.Shortcut;
+const GlobalHotkey = types.GlobalHotkey;
 const Command = types.Command;
 const Menu = types.Menu;
 const MenuItem = types.MenuItem;
@@ -368,6 +370,79 @@ test "manifest validates keyboard shortcuts" {
         .shortcuts = &.{.{ .id = long_id[0..], .key = "p" }},
     };
     try std.testing.expectError(error.InvalidShortcut, validateManifest(long_id_manifest));
+}
+
+test "manifest validates global hotkeys" {
+    const manifest: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .global_hotkeys = &.{
+            .{ .id = "capture.toggle", .key = "r", .modifiers = .{ .primary = true, .shift = true } },
+            .{ .id = "quick.entry", .key = "space", .modifiers = .{ .option = true } },
+        },
+    };
+    try validateManifest(manifest);
+
+    // The rule that separates a global hotkey from a local shortcut:
+    // a bare NON-text key is a legal local shortcut but an illegal
+    // global one, because the claim covers the whole machine.
+    const bare_function_key: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .global_hotkeys = &.{.{ .id = "bare", .key = "f5" }},
+    };
+    try std.testing.expectError(error.InvalidShortcut, validateManifest(bare_function_key));
+    // Same key, declared locally, is accepted.
+    const bare_function_key_shortcut: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .shortcuts = &.{.{ .id = "bare", .key = "f5" }},
+    };
+    try validateManifest(bare_function_key_shortcut);
+
+    const bare_text_key: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .global_hotkeys = &.{.{ .id = "bare", .key = "r" }},
+    };
+    try std.testing.expectError(error.InvalidShortcut, validateManifest(bare_text_key));
+
+    const invalid_key: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .global_hotkeys = &.{.{ .id = "invalid", .key = "@", .modifiers = .{ .primary = true } }},
+    };
+    try std.testing.expectError(error.InvalidShortcut, validateManifest(invalid_key));
+
+    const duplicate_id: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .global_hotkeys = &.{
+            .{ .id = "same", .key = "r", .modifiers = .{ .primary = true } },
+            .{ .id = "same", .key = "t", .modifiers = .{ .primary = true } },
+        },
+    };
+    try std.testing.expectError(error.DuplicateShortcut, validateManifest(duplicate_id));
+
+    const duplicate_chord: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .global_hotkeys = &.{
+            .{ .id = "first", .key = "r", .modifiers = .{ .primary = true } },
+            .{ .id = "second", .key = "R", .modifiers = .{ .primary = true } },
+        },
+    };
+    try std.testing.expectError(error.DuplicateShortcut, validateManifest(duplicate_chord));
+
+    // The ceiling is lower than the shortcut ceiling: each entry claims
+    // a chord the whole system shares.
+    const too_many = [_]GlobalHotkey{.{ .id = "over-limit", .key = "r", .modifiers = .{ .primary = true } }} ** (max_global_hotkeys + 1);
+    const too_many_manifest: Manifest = .{
+        .identity = .{ .id = "com.example.app", .name = "example" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .global_hotkeys = &too_many,
+    };
+    try std.testing.expectError(error.InvalidShortcut, validateManifest(too_many_manifest));
 }
 
 test "manifest validates command metadata" {

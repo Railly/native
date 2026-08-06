@@ -85,6 +85,72 @@ test "runtime configures platform keyboard shortcuts" {
     try std.testing.expectEqualStrings("command.palette", harness.null_platform.configuredShortcuts()[0].id);
 }
 
+test "runtime configures platform global hotkeys" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "hotkeys", .source = platform.WebViewSource.html("<h1>Hotkeys</h1>") };
+        }
+    };
+
+    const hotkeys = [_]platform.GlobalHotkey{
+        .{ .id = "capture.toggle", .key = "r", .modifiers = .{ .primary = true, .shift = true } },
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.global_hotkeys = &hotkeys;
+    var app_state: TestApp = .{};
+    try harness.runtime.run(app_state.app());
+
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.configuredGlobalHotkeys().len);
+    try std.testing.expectEqualStrings("capture.toggle", harness.null_platform.configuredGlobalHotkeys()[0].id);
+}
+
+test "runtime delivers a global hotkey as a raw event, not a command" {
+    const TestApp = struct {
+        hotkeys: usize = 0,
+        commands: usize = 0,
+        last_id: []const u8 = "",
+        last_key: []const u8 = "",
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "hotkeys", .source = platform.WebViewSource.html("<h1>Hotkeys</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .global_hotkey => |hotkey| {
+                    self.hotkeys += 1;
+                    self.last_id = hotkey.id;
+                    self.last_key = hotkey.key;
+                },
+                // A global hotkey names no window, so it must NOT arrive
+                // through the window-addressed command path the way a
+                // local shortcut does.
+                .command => self.commands += 1,
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.runtime.run(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .global_hotkey = .{
+        .id = "capture.toggle",
+        .key = "r",
+        .modifiers = .{ .primary = true, .shift = true },
+    } });
+
+    try std.testing.expectEqual(@as(usize, 1), app_state.hotkeys);
+    try std.testing.expectEqual(@as(usize, 0), app_state.commands);
+    try std.testing.expectEqualStrings("capture.toggle", app_state.last_id);
+    try std.testing.expectEqualStrings("r", app_state.last_key);
+}
+
 test "runtime dispatches app activation lifecycle events" {
     const TestApp = struct {
         events: [4]LifecycleEvent = undefined,

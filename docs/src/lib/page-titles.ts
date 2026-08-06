@@ -24,6 +24,7 @@ export const PAGE_TITLES: Record<string, string> = {
   windows: "Windows",
   webviews: "Multiple WebViews",
   "keyboard-shortcuts": "Keyboard Shortcuts",
+  "global-hotkeys": "Global Hotkeys",
   commands: "Commands",
   bridge: "Bridge",
   "bridge/builtin-commands": "Builtin Commands",

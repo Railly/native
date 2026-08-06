@@ -56,6 +56,7 @@ const unprefixedNavSections: NavSection[] = [
       { name: "Dialogs", href: "/dialogs" },
       { name: "System Tray", href: "/tray" },
       { name: "Keyboard Shortcuts", href: "/keyboard-shortcuts" },
+      { name: "Global Hotkeys", href: "/global-hotkeys" },
       { name: "Commands", href: "/commands" },
       { name: "Native Controls", href: "/native-controls" },
     ],

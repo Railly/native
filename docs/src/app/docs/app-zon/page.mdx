@@ -205,6 +205,10 @@ A fuller manifest for an app that also [embeds web content](/docs/frontend) and 
       <td>Keyboard shortcuts delivered as <code>shortcut</code> events (see <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>)</td>
     </tr>
     <tr>
+      <td><code>global_hotkeys</code></td>
+      <td>System-wide hotkeys that fire while another app has focus, delivered as <code>global_hotkey</code> events (see <a href="/docs/global-hotkeys">Global Hotkeys</a>)</td>
+    </tr>
+    <tr>
       <td><code>menus</code></td>
       <td>Native menu declarations delivered through the command event path (see <a href="/docs/menus">Menus</a>)</td>
     </tr>
@@ -317,6 +321,20 @@ Single-character keys and text-entry keys (`enter`, `tab`, `space`, and `backspa
 An app can define up to 64 shortcuts. Shortcut ids can be up to 64 bytes and keys can be up to 32 bytes.
 
 Chromium builds are currently macOS-only; use the Linux system WebView backend when an app needs native shortcut events on Linux.
+
+## `global_hotkeys`
+
+The optional `global_hotkeys` list defines system-wide hotkeys: they fire while another app has focus, unlike `shortcuts`, which only fire when one of your app's windows is key. Generated runners load these automatically:
+
+```zig
+.global_hotkeys = .{
+    .{ .id = "capture.toggle", .key = "r", .modifiers = .{ "primary", "shift" } },
+},
+```
+
+`id`, `key`, and `modifiers` use the same spelling and vocabulary as `shortcuts`, with two stricter rules: every hotkey needs at least one modifier (a bare global key would take it from every app on the machine, function keys included), and an app can define up to 16 of them rather than 64.
+
+macOS only today. See [Global Hotkeys](/docs/global-hotkeys).
 
 ## `menus`
 

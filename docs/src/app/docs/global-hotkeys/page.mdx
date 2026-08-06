@@ -1,0 +1,94 @@
+# Global Hotkeys
+
+A global hotkey is a system-wide chord: it fires while **another app holds the keyboard**, including when your app is hidden, behind other windows, or has no window at all. That reach is the only difference from a [keyboard shortcut](/docs/keyboard-shortcuts), which is scoped to your app's own windows and cannot fire unfocused.
+
+Reach for a global hotkey when the app must respond while the user is working somewhere else: a recorder toggle, a clipboard capture, a quick-entry panel. For anything the user triggers while already looking at your window, a keyboard shortcut is the right tool and costs the system nothing.
+
+macOS only today. Linux and Windows report the `global_hotkeys` feature as unsupported.
+
+## Manifest
+
+Declare hotkeys in `app.zon`:
+
+```zig
+.global_hotkeys = .{
+    .{ .id = "capture.toggle", .key = "r", .modifiers = .{ "primary", "shift" } },
+    .{ .id = "quick.entry", .key = "space", .modifiers = .{ "option" } },
+},
+```
+
+The spelling matches `.shortcuts`: `primary` is Command on macOS, and `command`, `control`, `option` or `alt`, and `shift` name a specific modifier. Ids and keys use the shortcut bounds (64 and 32 bytes) and the same [key vocabulary](/docs/keyboard-shortcuts#keys).
+
+Two rules are stricter than they are for shortcuts:
+
+- **Every hotkey needs at least one modifier**, for every key kind. A shortcut may claim a bare `f5` because a bare function key is not text the user types into your app. A *global* bare `f5` takes that key away from every app on the machine, so it is refused.
+- **An app can define up to 16 hotkeys** (shortcuts allow 64). Each entry claims a chord the whole system shares.
+
+Duplicate ids and duplicate chords are refused at validation.
+
+## Runtime
+
+Generated runners read `app.zon` and register the manifest hotkeys automatically. Use `RunOptions.global_hotkeys` only to override the manifest with a list built in Zig.
+
+Apps that construct a runtime directly pass them to `Runtime.init`:
+
+```zig
+const hotkeys = [_]native_sdk.GlobalHotkey{
+    .{ .id = "capture.toggle", .key = "r", .modifiers = .{ .primary = true, .shift = true } },
+};
+
+var runtime = native_sdk.Runtime.init(.{
+    .platform = platform,
+    .global_hotkeys = &hotkeys,
+});
+```
+
+## Events
+
+Zig apps receive `Event.global_hotkey`:
+
+```zig
+fn event(context: *anyopaque, runtime: *Runtime, ev: Event) anyerror!void {
+    _ = context;
+    _ = runtime;
+    switch (ev) {
+        .global_hotkey => |hotkey| {
+            if (std.mem.eql(u8, hotkey.id, "capture.toggle")) {
+                // Toggle capture. The user may be in another app right now.
+            }
+        },
+        else => {},
+    }
+}
+```
+
+`GlobalHotkeyEvent` carries `id`, `key`, and `modifiers` — and deliberately **no `windowId`**. The chord fired while another app owned the keyboard, so there is no focused window of yours to name. A hotkey is also not delivered as a `command` for the same reason: commands are window-addressed. If the hotkey should act on a window, pick one explicitly (for example `runtime.showWindow(1)`).
+
+The JavaScript bridge emits a `global_hotkey` event on `window.zero`, broadcast to every open window:
+
+```ts
+window.zero.on("global_hotkey", (event) => {
+  if (event.id === "capture.toggle") {
+    toggleCapture();
+  }
+});
+```
+
+The event detail includes `id`, `command`, `key`, and `modifiers`. `command` is an alias for `id`. An app with no open window still receives the Zig-side event; there is simply no bridge listener to broadcast to.
+
+## Chords the system already owns
+
+Registration is a claim on a chord the whole machine shares, and the OS refuses a chord another app already holds. When that happens the SDK **skips that one hotkey and registers the rest** rather than failing startup: which chords are free is a property of the running machine, not a defect in your app. Pick chords with two modifiers to lower the odds of a collision, and avoid the ones macOS reserves (Command+Space, Command+Tab).
+
+No Accessibility permission is required. macOS routes a registered chord to the owning process directly, so the app does not need to observe the user's other keystrokes and never prompts.
+
+## Platform support
+
+| Platform | Support |
+| --- | --- |
+| macOS (system WebView) | Supported |
+| macOS (Chromium) | Unsupported |
+| Linux | Unsupported |
+| Windows | Unsupported |
+
+Linux has no portable answer: X11 needs a grab per modifier permutation, and Wayland reserves global grabs for the compositor. Windows can support this through `RegisterHotKey` but is not wired yet. Check `platform.supports(.global_hotkeys)` before relying on the feature in a cross-platform app.

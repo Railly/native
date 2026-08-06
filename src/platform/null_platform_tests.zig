@@ -60,6 +60,7 @@ const max_gpu_surface_packet_json_bytes = types.max_gpu_surface_packet_json_byte
 const ShortcutModifiers = types.ShortcutModifiers;
 const Shortcut = types.Shortcut;
 const ShortcutEvent = types.ShortcutEvent;
+const GlobalHotkey = types.GlobalHotkey;
 const Menu = types.Menu;
 const MenuItem = types.MenuItem;
 const validateShortcut = types.validateShortcut;
@@ -314,6 +315,46 @@ test "null platform records configured shortcuts" {
 
     const unmodified_text_key = [_]Shortcut{.{ .id = "text", .key = "p" }};
     try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureShortcuts(&unmodified_text_key));
+}
+
+test "null platform records configured global hotkeys" {
+    const hotkeys = [_]GlobalHotkey{
+        .{ .id = "capture.toggle", .key = "r", .modifiers = .{ .primary = true, .shift = true } },
+    };
+    var null_platform = NullPlatform.init(.{});
+    try null_platform.platform().services.configureGlobalHotkeys(&hotkeys);
+
+    try std.testing.expectEqual(@as(usize, 1), null_platform.configuredGlobalHotkeys().len);
+    try std.testing.expectEqualStrings("capture.toggle", null_platform.configuredGlobalHotkeys()[0].id);
+    try std.testing.expectEqualStrings("r", null_platform.configuredGlobalHotkeys()[0].key);
+    try std.testing.expect(null_platform.configuredGlobalHotkeys()[0].modifiers.primary);
+    try std.testing.expect(null_platform.configuredGlobalHotkeys()[0].modifiers.shift);
+
+    const long_key = [_]u8{'x'} ** (max_shortcut_key_bytes + 1);
+    const invalid = [_]GlobalHotkey{.{ .id = "invalid", .key = long_key[0..], .modifiers = .{ .primary = true } }};
+    try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureGlobalHotkeys(&invalid));
+
+    const invalid_key = [_]GlobalHotkey{.{ .id = "invalid", .key = "@", .modifiers = .{ .primary = true } }};
+    try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureGlobalHotkeys(&invalid_key));
+
+    // The rule that separates a global hotkey from a local shortcut: a
+    // bare chord is refused even for a NON-text key, because the claim
+    // is system-wide. `f5` would be a legal bare local shortcut.
+    const unmodified_function_key = [_]GlobalHotkey{.{ .id = "bare", .key = "f5" }};
+    try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureGlobalHotkeys(&unmodified_function_key));
+
+    const unmodified_text_key = [_]GlobalHotkey{.{ .id = "text", .key = "r" }};
+    try std.testing.expectError(error.InvalidShortcut, null_platform.platform().services.configureGlobalHotkeys(&unmodified_text_key));
+}
+
+test "global hotkey configuration requires backend support for non-empty lists" {
+    const services = PlatformServices{};
+    try services.configureGlobalHotkeys(&.{});
+
+    const hotkeys = [_]GlobalHotkey{
+        .{ .id = "capture.toggle", .key = "r", .modifiers = .{ .primary = true } },
+    };
+    try std.testing.expectError(error.UnsupportedService, services.configureGlobalHotkeys(&hotkeys));
 }
 
 test "null platform records configured menus" {
