@@ -934,6 +934,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/root.zig", .pattern = ".high_contrast = event.high_contrast != 0" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".appearance_changed => state.emit" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-zero-delta-window-clamp", "Verify a clamped zero-delta move applies the corrected AppKit origin", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (dx != 0 || dy != 0 || newX != frame.origin.x || newY != frame.origin.y)" },
+        .{ .path = "src/runtime/effects.zig", .pattern = "a clamped zero-delta call may still" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
         .{ .path = "docs/src/app/security/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
         .{ .path = "docs/src/app/bridge/builtin-commands/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },

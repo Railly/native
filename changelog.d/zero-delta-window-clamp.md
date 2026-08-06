@@ -1,0 +1,1 @@
+fix: **Zero-delta window clamping**: a constrained `moveWindow` call now applies visible-frame corrections even when its requested delta is zero, keeping companion windows on screen after cross-display moves.

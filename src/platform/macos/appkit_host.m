@@ -10204,7 +10204,12 @@ int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t windo
             if (newY < minY) { newY = minY; hitY = YES; }
             if (newY > maxY) { newY = maxY; hitY = YES; }
         }
-        if (dx != 0 || dy != 0) [window setFrameOrigin:NSMakePoint(newX, newY)];
+        // A constrained zero-delta call is also a clamp pass. If the
+        // visible-frame correction changed the origin, write it back even
+        // though the requested delta itself was zero.
+        if (dx != 0 || dy != 0 || newX != frame.origin.x || newY != frame.origin.y) {
+            [window setFrameOrigin:NSMakePoint(newX, newY)];
+        }
         // Report in the pointer convention (top-left origin, y down),
         // the same space the deltas use, so callers integrate
         // velocities without sign flips: y = distance from the top of

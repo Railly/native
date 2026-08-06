@@ -3328,9 +3328,10 @@ pub fn Effects(comptime Msg: type) type {
         /// Move a window by a screen-space delta (dx right, dy down),
         /// optionally clamped to the visible frame. Synchronous: the
         /// result carries the applied origin, which axes the clamp
-        /// stopped, and the live primary-button state (dx=dy=0 reads
-        /// without moving). Null under the fake executor or when no
-        /// window actions are bound.
+        /// stopped, and the live primary-button state. An unclamped
+        /// zero-delta call only reads; a clamped zero-delta call may still
+        /// apply a visible-frame correction. Null under the fake executor
+        /// or when no window actions are bound.
         ///
         /// NOT yet journaled: session replay runs on the fake executor
         /// and reads null where the recording saw a result, so model
