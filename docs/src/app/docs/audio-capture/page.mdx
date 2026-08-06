@@ -1,0 +1,139 @@
+# Audio Capture
+
+Record the microphone and the system output mix as two separate mono WAV files. macOS only today.
+
+This is the capability behind a meeting recorder: one track of what you said, one track of what everyone else said, kept apart so they can be transcribed, mixed, or discarded independently. Recording them into one file throws that away and cannot be undone afterward.
+
+```zig
+fx.audioCapture(.{
+    .key = session_key,
+    .mic_path = "/Users/me/Recordings/session-01/mic.wav",
+    .system_path = "/Users/me/Recordings/session-01/system.wav",
+    .on_event = Effects.audioCaptureMsg(.capture_event),
+});
+
+// Later, from any update:
+fx.stopAudioCapture(session_key);
+```
+
+## Audio never crosses the effects channel
+
+The platform writes both files itself. The only things that travel through the effects channel are the two destination paths going in, and small events coming back.
+
+That is a deliberate boundary, not an implementation detail. An hour of 48 kHz mono is about 170 MB per track, and the effects channel is line-oriented — `fx.writeFile` caps a single write at 1 MB. Streaming PCM through it would be the wrong shape at every layer. The host opens both `AVAudioFile`s, writes frames as they arrive from each tap, and closes them on stop; your app receives level meters and totals.
+
+The practical consequence: **the recorded audio is on disk at the paths you named, and nowhere else.** It is not in the model, not in the journal, and not in a session replay. A replay reproduces the event stream your `update` saw — meters, totals, failures — and writes no files.
+
+## Events
+
+Every report arrives as an `on_event` Msg through the ordinary update path, carrying an `EffectAudioCapture` payload.
+
+<table>
+  <thead>
+    <tr>
+      <th>Kind</th>
+      <th>When</th>
+      <th>Carries</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>started</code></td>
+      <td>Both tracks are really recording — not when the request was accepted</td>
+      <td><code>key</code></td>
+    </tr>
+    <tr>
+      <td><code>level</code></td>
+      <td>About every 100ms while capturing</td>
+      <td><code>mic_level</code>, <code>system_level</code> (peak, 0..255)</td>
+    </tr>
+    <tr>
+      <td><code>stopped</code></td>
+      <td>Exactly once, after both files are flushed and closed</td>
+      <td><code>bytes_written</code> (both tracks), <code>duration_ms</code></td>
+    </tr>
+    <tr>
+      <td><code>failed</code></td>
+      <td>A permission refusal, a busy device, or a write that could not land</td>
+      <td><code>reason</code></td>
+    </tr>
+    <tr>
+      <td><code>rejected</code></td>
+      <td>The effects layer refused before the platform was asked</td>
+      <td><code>key</code></td>
+    </tr>
+  </tbody>
+</table>
+
+`mic_level` and `system_level` are meters for UI, never samples. A capture with no `on_event` still records; it just reports nothing back, including failures, so production code should always set one.
+
+### Failure reasons
+
+Each `reason` names a distinct remedy rather than a generic error:
+
+<table>
+  <thead>
+    <tr>
+      <th>Reason</th>
+      <th>Meaning</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>permission_denied</code></td>
+      <td>A TCC grant is missing. Send the user to System Settings; see below.</td>
+    </tr>
+    <tr>
+      <td><code>device_busy</code></td>
+      <td>Another process holds the input device, or the capture stream stopped on its own.</td>
+    </tr>
+    <tr>
+      <td><code>disk_full</code></td>
+      <td>A write could not land.</td>
+    </tr>
+    <tr>
+      <td><code>unsupported</code></td>
+      <td>This platform has no recorder. Windows and Linux answer here today.</td>
+    </tr>
+  </tbody>
+</table>
+
+## Rejections
+
+`audioCapture` never fails from the caller's view. These deliver exactly one `rejected` event instead of starting anything:
+
+- either path is empty or longer than `max_effect_audio_capture_path_bytes` (1024)
+- both paths name the same file — two tracks cannot share one file
+- a capture is already running
+
+The last one is worth stating: a running capture owns two open files, so a second start is refused rather than silently replacing it. Stop the first capture and start the next one. Stopping a key that names no active capture is a harmless no-op with no event, so a stop racing a failure is safe.
+
+## Permissions
+
+The system track records **what the machine is playing** — every other app's audio, not just yours. macOS gates that behind the Screen Recording permission, and the microphone track behind Microphone. Your app's own playback is excluded from the system track, so a recording never captures itself.
+
+Declare the microphone permission in `app.zon`:
+
+```zig
+.permissions = .{ "microphone" },
+```
+
+Screen Recording has no manifest declaration and no usage string: macOS grants it only through System Settings under Privacy & Security, and the user must add your app there. Neither grant can be requested by the app in a way that guarantees an answer, so treat `permission_denied` as an ordinary state your UI handles — point at System Settings and offer a retry. The capture fails as one event; it never crashes and never leaves an empty file looking like a successful recording.
+
+## Track alignment
+
+The two taps run on independent clocks: the input device's, and the system mix's. Nothing resamples one onto the other. Both files start when their first buffer arrives and end at stop, so a long capture can drift by the difference between those clocks — in practice well under a second over an hour.
+
+That is fine for two tracks a human or a transcriber aligns by content, which is what this serves. If you need sample-accurate alignment between the tracks, this API does not give it to you: that requires a shared timebase and a resampler.
+
+## Platform support
+
+macOS only. The host uses an `AVAudioEngine` input tap for the microphone and a ScreenCaptureKit audio stream for the system mix.
+
+Windows and Linux report `audio_capture` unsupported and answer `error.UnsupportedService`. Both operating systems expose the underlying capability — WASAPI loopback, PipeWire monitors — but the hosts implement no recorder, and a named refusal beats half a recording. Check before offering the feature:
+
+```zig
+if (runtime.supports(.audio_capture)) {
+    // show the record button
+}
+```
