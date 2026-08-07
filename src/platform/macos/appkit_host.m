@@ -3147,7 +3147,11 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (BOOL)isOpaque {
-    return YES;
+    // AppKit asks the view as well as its layer when deciding whether a
+    // window can composite through to the desktop. Keep this answer in
+    // lockstep with the owning window instead of claiming every Metal
+    // surface is opaque.
+    return self.window ? self.window.isOpaque : YES;
 }
 
 - (void)viewDidMoveToWindow {
@@ -3155,9 +3159,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     // The layer's opacity follows the window's: a transparent window
     // composites the surface's alpha over the desktop, and an opaque
     // layer would fill the clear pixels with black.
-    if (self.window && !self.window.isOpaque) {
-        self.metalLayer.opaque = NO;
-    }
+    self.metalLayer.opaque = self.window ? self.window.isOpaque : YES;
     self.window.acceptsMouseMovedEvents = YES;
     [self updateDrawableSize];
     [self updateSurfaceTrackingArea];
