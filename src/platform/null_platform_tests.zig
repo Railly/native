@@ -234,9 +234,9 @@ test "null platform records OS actions" {
         .icon_path = "/tmp/tray.png",
         .tooltip = "native-sdk",
         .items = &.{
-            .{ .id = 1, .label = "Open" },
+            .{ .id = 1, .label = "Open", .key = "r", .modifiers = .{ .primary = true, .shift = true } },
             .{ .separator = true },
-            .{ .id = 2, .label = "Quit", .enabled = false },
+            .{ .id = 2, .label = "Quit", .enabled = false, .key = "q", .modifiers = .{ .primary = true } },
         },
     });
 
@@ -269,9 +269,13 @@ test "null platform records OS actions" {
     try std.testing.expectEqual(@as(usize, 3), null_platform.trayItems().len);
     try std.testing.expectEqual(@as(TrayItemId, 1), null_platform.trayItems()[0].id);
     try std.testing.expectEqualStrings("Open", null_platform.trayItems()[0].label);
+    try std.testing.expectEqualStrings("r", null_platform.trayItems()[0].key);
+    try std.testing.expect(null_platform.trayItems()[0].modifiers.primary);
+    try std.testing.expect(null_platform.trayItems()[0].modifiers.shift);
     try std.testing.expect(null_platform.trayItems()[1].separator);
     try std.testing.expectEqual(@as(TrayItemId, 2), null_platform.trayItems()[2].id);
     try std.testing.expect(!null_platform.trayItems()[2].enabled);
+    try std.testing.expectEqualStrings("q", null_platform.trayItems()[2].key);
 
     var credential_buffer: [64]u8 = undefined;
     const secret = try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer);

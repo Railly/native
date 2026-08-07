@@ -58,6 +58,8 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url);
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event);
 static BOOL NativeSdkShortcutUsesImplicitShift(NSString *key, NSEvent *event);
 static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
+static NSString *NativeSdkMenuKeyEquivalent(NSString *key);
+static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers);
 
 static NSString *NativeSdkStringFromBytes(const char *bytes, size_t len) {
     if (!bytes || len == 0) return nil;
@@ -2035,6 +2037,58 @@ static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventM
     return hasCommand == needsCommand && hasControl == needsControl && hasOption == needsOption && shiftMatches;
 }
 
+static NSString *NativeSdkMenuKeyEquivalent(NSString *key) {
+    if (key.length == 0) return @"";
+    // Lowercase single characters too (key names validate
+    // case-insensitively): an uppercase key equivalent implies Shift to
+    // AppKit, which the explicit modifier mask already expresses.
+    if (key.length == 1) return key.lowercaseString;
+    static NSDictionary<NSString *, NSString *> *named = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        named = @{
+            @"escape": [NSString stringWithFormat:@"%C", (unichar)0x1b],
+            @"enter": @"\r",
+            @"tab": @"\t",
+            @"space": @" ",
+            @"backspace": [NSString stringWithFormat:@"%C", (unichar)0x7f],
+            @"arrowup": [NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey],
+            @"arrowdown": [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey],
+            @"arrowleft": [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey],
+            @"arrowright": [NSString stringWithFormat:@"%C", (unichar)NSRightArrowFunctionKey],
+            @"delete": [NSString stringWithFormat:@"%C", (unichar)NSDeleteFunctionKey],
+            @"home": [NSString stringWithFormat:@"%C", (unichar)NSHomeFunctionKey],
+            @"end": [NSString stringWithFormat:@"%C", (unichar)NSEndFunctionKey],
+            @"pageup": [NSString stringWithFormat:@"%C", (unichar)NSPageUpFunctionKey],
+            @"pagedown": [NSString stringWithFormat:@"%C", (unichar)NSPageDownFunctionKey],
+            @"insert": [NSString stringWithFormat:@"%C", (unichar)NSInsertFunctionKey],
+            @"f1": [NSString stringWithFormat:@"%C", (unichar)NSF1FunctionKey],
+            @"f2": [NSString stringWithFormat:@"%C", (unichar)NSF2FunctionKey],
+            @"f3": [NSString stringWithFormat:@"%C", (unichar)NSF3FunctionKey],
+            @"f4": [NSString stringWithFormat:@"%C", (unichar)NSF4FunctionKey],
+            @"f5": [NSString stringWithFormat:@"%C", (unichar)NSF5FunctionKey],
+            @"f6": [NSString stringWithFormat:@"%C", (unichar)NSF6FunctionKey],
+            @"f7": [NSString stringWithFormat:@"%C", (unichar)NSF7FunctionKey],
+            @"f8": [NSString stringWithFormat:@"%C", (unichar)NSF8FunctionKey],
+            @"f9": [NSString stringWithFormat:@"%C", (unichar)NSF9FunctionKey],
+            @"f10": [NSString stringWithFormat:@"%C", (unichar)NSF10FunctionKey],
+            @"f11": [NSString stringWithFormat:@"%C", (unichar)NSF11FunctionKey],
+            @"f12": [NSString stringWithFormat:@"%C", (unichar)NSF12FunctionKey],
+        };
+    });
+    NSString *equivalent = named[key.lowercaseString];
+    return equivalent ?: @"";
+}
+
+static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers) {
+    NSEventModifierFlags flags = 0;
+    if ((modifiers & NativeSdkShortcutModifierPrimary) != 0 || (modifiers & NativeSdkShortcutModifierCommand) != 0) flags |= NSEventModifierFlagCommand;
+    if ((modifiers & NativeSdkShortcutModifierControl) != 0) flags |= NSEventModifierFlagControl;
+    if ((modifiers & NativeSdkShortcutModifierOption) != 0) flags |= NSEventModifierFlagOption;
+    if ((modifiers & NativeSdkShortcutModifierShift) != 0) flags |= NSEventModifierFlagShift;
+    return flags;
+}
+
 static BOOL NativeSdkWildcardPrefixHasPath(NSString *prefix) {
     NSURLComponents *components = [NSURLComponents componentsWithString:prefix ?: @""];
     return components.scheme.length > 0 && components.host.length > 0 && components.percentEncodedPath.length > 0;
@@ -3339,7 +3393,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
     }
 }
 
-void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, const int *separators, const int *enabled_flags, size_t count) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
         if (!object.statusItem) return;
@@ -3350,11 +3404,13 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
                 continue;
             }
             NSString *label = labels[i] ? [[NSString alloc] initWithBytes:labels[i] length:label_lens[i] encoding:NSUTF8StringEncoding] : @"";
+            NSString *key = (keys && keys[i] && key_lens[i] > 0) ? [[NSString alloc] initWithBytes:keys[i] length:key_lens[i] encoding:NSUTF8StringEncoding] : @"";
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
                                                           action:@selector(trayMenuItemClicked:)
-                                                   keyEquivalent:@""];
+                                                   keyEquivalent:NativeSdkMenuKeyEquivalent(key ?: @"")];
             item.tag = (NSInteger)item_ids[i];
             item.target = object;
+            item.keyEquivalentModifierMask = NativeSdkMenuModifierFlags(modifiers ? modifiers[i] : 0);
             item.enabled = enabled_flags[i] != 0;
             [menu addItem:item];
         }

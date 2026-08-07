@@ -13165,7 +13165,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
     }
 }
 
-void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, const int *separators, const int *enabled_flags, size_t count) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         if (!object.statusItem) return;
@@ -13176,12 +13176,14 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
                 continue;
             }
             NSString *label = labels[i] ? [[NSString alloc] initWithBytes:labels[i] length:label_lens[i] encoding:NSUTF8StringEncoding] : @"";
+            NSString *key = (keys && keys[i] && key_lens[i] > 0) ? [[NSString alloc] initWithBytes:keys[i] length:key_lens[i] encoding:NSUTF8StringEncoding] : @"";
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
                                                           action:@selector(trayMenuItemClicked:)
-                                                   keyEquivalent:@""];
+                                                   keyEquivalent:NativeSdkMenuKeyEquivalent(key ?: @"")];
             item.tag = (NSInteger)item_ids[i];
             item.target = object;
             item.enabled = enabled_flags[i] != 0;
+            item.keyEquivalentModifierMask = NativeSdkMenuModifierFlags(modifiers ? modifiers[i] : 0);
             [menu addItem:item];
         }
         object.statusItem.menu = menu;

@@ -543,6 +543,8 @@ struct Menu {
 struct TrayItem {
     uint32_t id = 0;
     std::string label;
+    std::string key;
+    uint32_t modifiers = 0;
     uint32_t command_id = 0;
     bool separator = false;
     bool enabled = true;
@@ -1452,8 +1454,8 @@ static std::string shortcutKeyLabel(const std::string &key) {
     return key;
 }
 
-static std::string menuShortcutSuffix(const MenuItem &item) {
-    if (item.key.empty()) return std::string();
+static std::string shortcutSuffixForKey(const std::string &key, uint32_t modifiers) {
+    if (key.empty()) return std::string();
     std::string suffix = "\t";
     bool has_prefix = false;
     auto append = [&](const char *value) {
@@ -1461,13 +1463,21 @@ static std::string menuShortcutSuffix(const MenuItem &item) {
         suffix += value;
         has_prefix = true;
     };
-    if ((item.modifiers & kShortcutModifierPrimary) != 0 || (item.modifiers & kShortcutModifierControl) != 0) append("Ctrl");
-    if ((item.modifiers & kShortcutModifierCommand) != 0) append("Win");
-    if ((item.modifiers & kShortcutModifierOption) != 0) append("Alt");
-    if ((item.modifiers & kShortcutModifierShift) != 0) append("Shift");
+    if ((modifiers & kShortcutModifierPrimary) != 0 || (modifiers & kShortcutModifierControl) != 0) append("Ctrl");
+    if ((modifiers & kShortcutModifierCommand) != 0) append("Win");
+    if ((modifiers & kShortcutModifierOption) != 0) append("Alt");
+    if ((modifiers & kShortcutModifierShift) != 0) append("Shift");
     if (has_prefix) suffix += "+";
-    suffix += shortcutKeyLabel(item.key);
+    suffix += shortcutKeyLabel(key);
     return suffix;
+}
+
+static std::string menuShortcutSuffix(const MenuItem &item) {
+    return shortcutSuffixForKey(item.key, item.modifiers);
+}
+
+static std::string trayShortcutSuffix(const TrayItem &item) {
+    return shortcutSuffixForKey(item.key, item.modifiers);
 }
 
 static HMENU buildMenuBar(Host *host) {
@@ -1547,7 +1557,7 @@ static void showTrayMenu(Host *host, HWND hwnd) {
         }
         UINT flags = MF_STRING;
         if (!item.enabled) flags |= MF_GRAYED;
-        std::wstring label = widen(item.label);
+        std::wstring label = widen(item.label + trayShortcutSuffix(item));
         AppendMenuW(menu, flags, item.command_id, label.c_str());
     }
     POINT cursor = {};
@@ -7141,15 +7151,20 @@ int native_sdk_windows_create_tray(Host *host, const char *icon_path, size_t ico
     return 1;
 }
 
-int native_sdk_windows_update_tray_menu(Host *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, size_t count) {
+int native_sdk_windows_update_tray_menu(Host *host, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, const int *separators, const int *enabled_flags, size_t count) {
     if (!host || !host->tray_active) return 0;
     host->tray_items.clear();
-    if (count > 0 && (!item_ids || !labels || !label_lens || !separators || !enabled_flags)) return 0;
+    if (count > 0 && (!item_ids || !labels || !label_lens || !keys || !key_lens || !modifiers || !separators || !enabled_flags)) return 0;
     host->tray_items.reserve(count);
     for (size_t index = 0; index < count; ++index) {
         TrayItem item;
         item.id = item_ids[index];
         item.label = slice(labels[index], label_lens[index]);
+        item.key = slice(keys[index], key_lens[index]);
+        for (char &ch : item.key) {
+            if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+        }
+        item.modifiers = modifiers[index];
         item.separator = separators[index] != 0;
         item.enabled = enabled_flags[index] != 0;
         if (!item.separator) item.command_id = kTrayCommandBase + static_cast<uint32_t>(index);

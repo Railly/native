@@ -132,6 +132,7 @@ pub fn validateTrayMenuItems(items: []const platform.TrayMenuItem) !void {
     for (items, 0..) |item, index| {
         try validateTrayField(item.label, platform.max_tray_item_label_bytes);
         try validateTrayField(item.command, platform.max_tray_item_command_bytes);
+        try platform.validateTrayMenuItemKey(item.key, item.modifiers);
         if (item.id != 0) {
             for (items[0..index]) |previous| {
                 if (previous.id == item.id) return error.InvalidTrayOptions;

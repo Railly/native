@@ -67,6 +67,16 @@ On macOS, `title` renders the tray as a menu-bar extra: a titled `NSStatusItem` 
       <td><code>""</code></td>
     </tr>
     <tr>
+      <td><code>key</code></td>
+      <td><code>[]const u8</code></td>
+      <td><code>""</code></td>
+    </tr>
+    <tr>
+      <td><code>modifiers</code></td>
+      <td><code>ShortcutModifiers</code></td>
+      <td><code>.{}</code></td>
+    </tr>
+    <tr>
       <td><code>separator</code></td>
       <td><code>bool</code></td>
       <td><code>false</code></td>
@@ -78,6 +88,8 @@ On macOS, `title` renders the tray as a menu-bar extra: a titled `NSStatusItem` 
     </tr>
   </tbody>
 </table>
+
+`key`/`modifiers` render the row's trailing key-equivalent (macOS `NSMenuItem.keyEquivalent`, a `\tCtrl+Shift+R`-style suffix on Windows). They are display only: selecting the row still dispatches `command` through the ordinary tray click path, and no local or global shortcut gets registered from them — pair a matching entry in `runtime.configureShortcuts` or `WindowOptions.global_hotkeys` if the key should actually fire the action from the keyboard. Same key vocabulary and modifier rules as `MenuItem.key`/`modifiers` (see [Menus](/docs/menus)); a non-empty `key` needs a modifier unless the key itself implies one.
 
 ## PlatformServices methods
 
@@ -97,9 +109,9 @@ When a user clicks a tray menu item, the runtime dispatches a `CommandEvent` wit
 try runtime.createTray(.{
     .tooltip = "native-sdk",
     .items = &.{
-        .{ .id = 1, .label = "Refresh", .command = "app.refresh" },
+        .{ .id = 1, .label = "Refresh", .command = "app.refresh", .key = "r", .modifiers = .{ .primary = true } },
         .{ .separator = true },
-        .{ .id = 2, .label = "Quit", .command = "app.quit" },
+        .{ .id = 2, .label = "Quit", .command = "app.quit", .key = "q", .modifiers = .{ .primary = true } },
     },
 });
 ```

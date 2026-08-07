@@ -267,6 +267,7 @@ pub const max_tray_title_bytes: usize = 64;
 pub const max_tray_tooltip_bytes: usize = 256;
 pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
+pub const max_tray_item_key_bytes: usize = 32;
 pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
@@ -426,6 +427,18 @@ pub fn validateMenuItem(item: MenuItem) Error!void {
         if (item.key.len > max_menu_key_bytes) return error.InvalidShortcut;
         if (!item.modifiers.hasAny() and shortcutRequiresModifier(item.key)) return error.InvalidShortcut;
     }
+}
+
+/// Same display-key rules as `validateMenuItem`'s `key`/`modifiers`, for
+/// the tray row's visible key-equivalent. Separate from `validateShortcut`:
+/// a tray row's key is cosmetic (no local or global chord gets registered
+/// from it), but the vocabulary a host can render is identical, so the
+/// same key/modifier rules apply.
+pub fn validateTrayMenuItemKey(key: []const u8, modifiers: ShortcutModifiers) Error!void {
+    if (key.len == 0) return;
+    if (!isValidShortcutKey(key)) return error.InvalidShortcut;
+    if (key.len > max_tray_item_key_bytes) return error.InvalidShortcut;
+    if (!modifiers.hasAny() and shortcutRequiresModifier(key)) return error.InvalidShortcut;
 }
 
 fn isValidCommandId(command: []const u8, max_len: usize) bool {
@@ -1410,6 +1423,13 @@ pub const TrayMenuItem = struct {
     id: TrayItemId = 0,
     label: []const u8 = "",
     command: []const u8 = "",
+    /// Visible key-equivalent shown at the trailing edge of the row
+    /// (macOS `NSMenuItem.keyEquivalent`), same key vocabulary as
+    /// `MenuItem.key`. Display only: selecting the row still dispatches
+    /// `command` through the ordinary tray click path, it does not
+    /// register a system-wide or local shortcut.
+    key: []const u8 = "",
+    modifiers: ShortcutModifiers = .{},
     separator: bool = false,
     enabled: bool = true,
 };

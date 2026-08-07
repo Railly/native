@@ -320,13 +320,18 @@ test "runtime validates native OS actions before platform dispatch" {
 
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createTray(.{ .items = &.{.{ .label = "" }} }));
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .label = "" }}));
+    // A bare letter key with no modifier would fire on every keystroke, so
+    // it is refused the same way a window MenuItem's key is (the tray row
+    // is display-only, but the vocabulary and the "needs a modifier"
+    // rule are shared with the real accelerator system).
+    try std.testing.expectError(error.InvalidShortcut, harness.runtime.createTray(.{ .items = &.{.{ .id = 1, .label = "Record", .key = "r" }} }));
     try harness.runtime.createTray(.{
         .icon_path = "/tmp/tray.png",
         .tooltip = "native-sdk",
         .items = &.{
-            .{ .id = 1, .label = "Open" },
+            .{ .id = 1, .label = "Open", .key = "r", .modifiers = .{ .primary = true, .shift = true } },
             .{ .separator = true },
-            .{ .id = 2, .label = "Quit", .enabled = false },
+            .{ .id = 2, .label = "Quit", .enabled = false, .key = "q", .modifiers = .{ .primary = true } },
         },
     });
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
@@ -334,6 +339,9 @@ test "runtime validates native OS actions before platform dispatch" {
     try std.testing.expectEqualStrings("native-sdk", harness.null_platform.lastTrayTooltip());
     try std.testing.expectEqual(@as(usize, 3), harness.null_platform.trayItems().len);
     try std.testing.expectEqualStrings("Open", harness.null_platform.trayItems()[0].label);
+    try std.testing.expectEqualStrings("r", harness.null_platform.trayItems()[0].key);
+    try std.testing.expect(harness.null_platform.trayItems()[0].modifiers.primary);
+    try std.testing.expect(harness.null_platform.trayItems()[0].modifiers.shift);
     try std.testing.expect(harness.null_platform.trayItems()[1].separator);
     try std.testing.expect(!harness.null_platform.trayItems()[2].enabled);
     try harness.runtime.updateTrayMenu(&.{.{ .id = 3, .label = "Settings" }});
