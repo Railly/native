@@ -920,6 +920,11 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 // The image installed by create_tray, cached so icon-visibility toggles
 // never re-read the file from disk.
 @property(nonatomic, strong) NSImage *statusItemIcon;
+// YES when button.title currently holds the synthetic appName-initial
+// fallback (no real title, no image) rather than a real caller-set
+// title. Lets a later icon-visible restore clear the fallback instead
+// of leaving it stuck beside the returned icon.
+@property(nonatomic, assign) BOOL statusItemTitleIsFallback;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
@@ -12447,6 +12452,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
         BOOL hasTitle = title != NULL && title_len > 0;
         object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
         object.statusItemIcon = nil;
+        object.statusItemTitleIsFallback = NO;
 
         if (icon_path && icon_path_len > 0) {
             NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
@@ -12463,6 +12469,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
         }
         if (!object.statusItem.button.image && object.statusItem.button.title.length == 0) {
             object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+            object.statusItemTitleIsFallback = YES;
         }
         if (tooltip && tooltip_len > 0) {
             object.statusItem.button.toolTip = [[NSString alloc] initWithBytes:tooltip length:tooltip_len encoding:NSUTF8StringEncoding];
@@ -12500,10 +12507,12 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
         BOOL hasTitle = title != NULL && title_len > 0;
         NSString *value = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
         object.statusItem.button.title = value;
+        object.statusItemTitleIsFallback = NO;
         if (!object.statusItem.button.image && value.length == 0) {
             // Same fallback as create: a bare status item must still show
             // SOMETHING to stay clickable.
             object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+            object.statusItemTitleIsFallback = YES;
         }
         // Titled extras need variable width; icon-only ones keep the
         // classic square well (mirrors create's length choice).
@@ -12517,8 +12526,16 @@ void native_sdk_appkit_update_tray_icon_visible(native_sdk_appkit_host_t *host, 
         if (!object.statusItem) return;
         if (visible) {
             // Restore the cached image from create — never reloaded
-            // from disk.
+            // from disk. An image coming back retires any synthetic
+            // appName-initial title update_tray_title stamped while
+            // this button had neither image nor real title (otherwise
+            // the fallback letter would sit stuck beside the returned
+            // icon).
             object.statusItem.button.image = object.statusItemIcon;
+            if (object.statusItemTitleIsFallback) {
+                object.statusItem.button.title = @"";
+                object.statusItemTitleIsFallback = NO;
+            }
         } else {
             object.statusItem.button.image = nil;
         }
@@ -12526,6 +12543,7 @@ void native_sdk_appkit_update_tray_icon_visible(native_sdk_appkit_host_t *host, 
             // Same fallback as create/update_tray_title: a bare status
             // item must still show SOMETHING to stay clickable.
             object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+            object.statusItemTitleIsFallback = YES;
         }
         // Titled extras (or the appName fallback) need variable width;
         // icon-only stays the classic square well (mirrors create's and
@@ -12540,6 +12558,7 @@ void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host) {
         [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         object.statusItem = nil;
         object.statusItemIcon = nil;
+        object.statusItemTitleIsFallback = NO;
     }
 }
 
