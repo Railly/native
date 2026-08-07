@@ -997,6 +997,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) EventHandlerRef globalHotkeyHandler;
 @property(nonatomic, assign) uint32_t nextGlobalHotkeyId;
 @property(nonatomic, strong) NSStatusItem *statusItem;
+// The image installed by create_tray, cached so icon-visibility toggles
+// never re-read the file from disk.
+@property(nonatomic, strong) NSImage *statusItemIcon;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
@@ -13131,6 +13134,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
         // items keep the classic square well.
         BOOL hasTitle = title != NULL && title_len > 0;
         object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
+        object.statusItemIcon = nil;
 
         if (icon_path && icon_path_len > 0) {
             NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
@@ -13138,6 +13142,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
             if (image) {
                 image.template = YES;
                 image.size = NSMakeSize(18, 18);
+                object.statusItemIcon = image;
                 object.statusItem.button.image = image;
             }
         }
@@ -13194,11 +13199,35 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
     }
 }
 
+void native_sdk_appkit_update_tray_icon_visible(native_sdk_appkit_host_t *host, int visible) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        if (!object.statusItem) return;
+        if (visible) {
+            // Restore the cached image from create — never reloaded
+            // from disk.
+            object.statusItem.button.image = object.statusItemIcon;
+        } else {
+            object.statusItem.button.image = nil;
+        }
+        if (!object.statusItem.button.image && object.statusItem.button.title.length == 0) {
+            // Same fallback as create/update_tray_title: a bare status
+            // item must still show SOMETHING to stay clickable.
+            object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+        }
+        // Titled extras (or the appName fallback) need variable width;
+        // icon-only stays the classic square well (mirrors create's and
+        // update_tray_title's length choice).
+        object.statusItem.length = object.statusItem.button.title.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength;
+    }
+}
+
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (object.statusItem) {
         [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         object.statusItem = nil;
+        object.statusItemIcon = nil;
     }
 }
 

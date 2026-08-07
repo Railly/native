@@ -146,7 +146,7 @@ app.* = PreviewApp.init(allocator, .{}, .{
 
 macOS (`NSStatusItem`) is the proven host; platforms without a status-bar service log a warning and continue. See `examples/canvas-preview` for the live composition.
 
-## Model-driven title and menu
+## Model-driven title, icon visibility, and menu
 
 For a live menu-bar extra — an open-count badge in the title, the latest items in the dropdown — add `UiApp.Options.status_item_fn`. It is consulted on install and after every rebuild, and the runtime re-applies only what actually changed: a title-only change retitles the live status button (no flicker, no menu rebuild), a menu change updates the dropdown. The static `status_item` still provides the icon and tooltip.
 
@@ -162,6 +162,20 @@ fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusIt
 ```
 
 Selections dispatch each item's `command` through `on_command` with source `.tray`, the same shape as window menus. Platforms without a tray-title seam keep the menu updates and log the missing title support once.
+
+`StatusItemState.icon_visible` (default `true`) shows or hides the button's icon image without re-creating the status item — the same no-flicker seam as the title. A recording-clock menu-bar extra swaps between an icon-only idle look and a bare `"● 00:12"` title while recording:
+
+```zig
+fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusItemState {
+    if (model.recording) {
+        const title = std.fmt.bufPrint(&scratch.title_buffer, "● {d:0>2}:{d:0>2}", .{ model.elapsed_min, model.elapsed_sec }) catch "●";
+        return .{ .title = title, .icon_visible = false };
+    }
+    return .{ .title = "", .icon_visible = true };
+}
+```
+
+The host caches the icon image installed at create time, so toggling visibility never re-reads the icon file from disk. Platforms without the seam keep the title and menu updates flowing and log the missing icon-visibility support once.
 
 ## The menu-bar app lifecycle
 

@@ -509,6 +509,8 @@ pub const NullPlatform = struct {
     tray_create_count: usize = 0,
     tray_update_count: usize = 0,
     tray_title_update_count: usize = 0,
+    tray_icon_visible: bool = true,
+    tray_icon_visible_update_count: usize = 0,
     tray_remove_count: usize = 0,
     window_event_window_id: WindowId = 0,
     window_event_name: [max_window_event_name_bytes]u8 = undefined,
@@ -897,6 +899,7 @@ pub const NullPlatform = struct {
                 .create_tray_fn = createTray,
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
+                .update_tray_icon_visible_fn = updateTrayIconVisible,
                 .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
@@ -1554,6 +1557,7 @@ pub const NullPlatform = struct {
         self.tray_title_len = (try copyInto(&self.tray_title, options.title)).len;
         self.tray_tooltip_len = (try copyInto(&self.tray_tooltip, options.tooltip)).len;
         try updateTrayMenu(context, options.items);
+        self.tray_icon_visible = true;
         self.tray_create_count += 1;
     }
 
@@ -1572,10 +1576,17 @@ pub const NullPlatform = struct {
         self.tray_title_update_count += 1;
     }
 
+    fn updateTrayIconVisible(context: ?*anyopaque, visible: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.tray_icon_visible = visible;
+        self.tray_icon_visible_update_count += 1;
+    }
+
     fn removeTray(context: ?*anyopaque) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.tray_item_count = 0;
         self.tray_remove_count += 1;
+        self.tray_icon_visible = true;
     }
 
     fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {
@@ -2971,6 +2982,14 @@ pub const NullPlatform = struct {
 
     pub fn trayTitleUpdateCount(self: *const NullPlatform) usize {
         return self.tray_title_update_count;
+    }
+
+    pub fn lastTrayIconVisible(self: *const NullPlatform) bool {
+        return self.tray_icon_visible;
+    }
+
+    pub fn trayIconVisibleUpdateCount(self: *const NullPlatform) usize {
+        return self.tray_icon_visible_update_count;
     }
 
     pub fn trayRemoveCount(self: *const NullPlatform) usize {

@@ -563,6 +563,9 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, strong) id shortcutEventMonitor;
 @property(nonatomic, strong) NSArray<NativeSdkChromiumShortcut *> *shortcuts;
 @property(nonatomic, strong) NSStatusItem *statusItem;
+// The image installed by create_tray, cached so icon-visibility toggles
+// never re-read the file from disk.
+@property(nonatomic, strong) NSImage *statusItemIcon;
 @property(nonatomic, assign) native_sdk_appkit_tray_callback_t trayCallback;
 @property(nonatomic, assign) void *trayContext;
 @property(nonatomic) CefRefPtr<NativeSdkCefClient> cefClient;
@@ -3305,6 +3308,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
         // items keep the classic square well.
         BOOL hasTitle = title != NULL && title_len > 0;
         object.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
+        object.statusItemIcon = nil;
 
         if (icon_path && icon_path_len > 0) {
             NSString *path = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding];
@@ -3312,6 +3316,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, const char *i
             if (image) {
                 [image setTemplate:YES];
                 image.size = NSMakeSize(18, 18);
+                object.statusItemIcon = image;
                 object.statusItem.button.image = image;
             }
         }
@@ -3381,11 +3386,28 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
     }
 }
 
+void native_sdk_appkit_update_tray_icon_visible(native_sdk_appkit_host_t *host, int visible) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    @autoreleasepool {
+        if (!object.statusItem) return;
+        if (visible) {
+            object.statusItem.button.image = object.statusItemIcon;
+        } else {
+            object.statusItem.button.image = nil;
+        }
+        if (!object.statusItem.button.image && object.statusItem.button.title.length == 0) {
+            object.statusItem.button.title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
+        }
+        object.statusItem.length = object.statusItem.button.title.length > 0 ? NSVariableStatusItemLength : NSSquareStatusItemLength;
+    }
+}
+
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     if (object.statusItem) {
         [[NSStatusBar systemStatusBar] removeStatusItem:object.statusItem];
         object.statusItem = nil;
+        object.statusItemIcon = nil;
     }
 }
 

@@ -832,6 +832,11 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, const ui
  * the icon-only square well, or the app-name initial when there is no
  * icon either — the same fallbacks as create. */
 void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const char *title, size_t title_len);
+/* Show or hide the live status item's icon image without re-creating it
+ * or reloading it from disk (the image installed by create is cached).
+ * Hiding with an empty title falls back to the app-name initial, same
+ * as create/update_tray_title. */
+void native_sdk_appkit_update_tray_icon_visible(native_sdk_appkit_host_t *host, int visible);
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host);
 void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_callback_t callback, void *context);
 

@@ -3470,6 +3470,101 @@ test "ui app status_item_fn drives the tray title and menu from the model" {
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
 }
 
+// ------------------------------------------- model-driven icon visibility
+
+const IconStateModel = struct {
+    recording: bool = false,
+};
+
+const IconStateMsg = union(enum) {
+    toggle_recording,
+};
+
+const IconStateApp = ui_app_model.UiApp(IconStateModel, IconStateMsg);
+
+fn iconStateUpdate(model: *IconStateModel, msg: IconStateMsg) void {
+    switch (msg) {
+        .toggle_recording => model.recording = !model.recording,
+    }
+}
+
+fn iconStateView(ui: *IconStateApp.Ui, model: *const IconStateModel) IconStateApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .padding = 12 }, .{});
+}
+
+fn iconStateCommand(name: []const u8) ?IconStateMsg {
+    if (std.mem.eql(u8, name, "app.toggle")) return .toggle_recording;
+    return null;
+}
+
+const icon_state_items = [_]zero_platform.TrayMenuItem{
+    .{ .id = 1, .label = "Toggle", .command = "app.toggle" },
+};
+
+/// A recording-clock menu-bar extra shape: idle shows the icon with no
+/// title, recording hides the icon and shows a live title in its place.
+fn iconStateStatusItem(model: *const IconStateModel, scratch: *IconStateApp.StatusItemScratch) IconStateApp.StatusItemState {
+    if (model.recording) {
+        const title = std.fmt.bufPrint(&scratch.title_buffer, "* 00:12", .{}) catch "* 00:12";
+        return .{ .title = title, .icon_visible = false, .items = &icon_state_items };
+    }
+    return .{ .title = "", .icon_visible = true, .items = &icon_state_items };
+}
+
+test "ui app status_item_fn drives icon visibility from the model" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(IconStateApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = IconStateApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-icon-state",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = iconStateUpdate,
+        .view = iconStateView,
+        .on_command = iconStateCommand,
+        .status_item = .{ .icon_path = "/tmp/tray-icon.png" },
+        .status_item_fn = iconStateStatusItem,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    const frame_event = zero_platform.GpuSurfaceFrameEvent{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    };
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = frame_event });
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
+    // Idle: icon visible, no title.
+    try std.testing.expect(harness.null_platform.lastTrayIconVisible());
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.trayIconVisibleUpdateCount());
+
+    // Recording: the icon hides and the title carries the live clock,
+    // in one rebuild.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 1 });
+    try std.testing.expect(app_state.model.recording);
+    try std.testing.expectEqualStrings("* 00:12", harness.null_platform.lastTrayTitle());
+    try std.testing.expect(!harness.null_platform.lastTrayIconVisible());
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayIconVisibleUpdateCount());
+
+    // Stop: the icon returns without a re-install (create_tray still
+    // fired exactly once).
+    try harness.runtime.dispatchPlatformEvent(app, .{ .tray_action = 1 });
+    try std.testing.expect(!app_state.model.recording);
+    try std.testing.expectEqualStrings("", harness.null_platform.lastTrayTitle());
+    try std.testing.expect(harness.null_platform.lastTrayIconVisible());
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.trayIconVisibleUpdateCount());
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
+}
+
 test "ui app tray state rides automation snapshots and tray-action drives a row" {
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);

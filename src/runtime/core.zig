@@ -208,6 +208,7 @@ pub const Runtime = struct {
     tray_created: bool = false,
     tray_title: []const u8 = "",
     tray_title_storage: [platform.max_tray_title_bytes]u8 = undefined,
+    tray_icon_visible: bool = true,
     /// Audio playback mirror for the automation snapshot, stamped by
     /// the ui-app layer whenever a dispatch or effect drain may have
     /// moved the effects channel's playback state. Like the tray, the
@@ -770,6 +771,7 @@ pub const Runtime = struct {
     pub const createTray = SystemServiceMethods.createTray;
     pub const updateTrayMenu = SystemServiceMethods.updateTrayMenu;
     pub const updateTrayTitle = SystemServiceMethods.updateTrayTitle;
+    pub const updateTrayIconVisible = SystemServiceMethods.updateTrayIconVisible;
     pub const removeTray = SystemServiceMethods.removeTray;
     const trayCommandNameForItem = SystemServiceMethods.trayCommandNameForItem;
     const supportsFeatureFromJson = SystemServiceMethods.supportsFeatureFromJson;
