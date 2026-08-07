@@ -188,7 +188,7 @@ extern fn native_sdk_windows_show_save_dialog(host: *WindowsHost, opts: *const W
 extern fn native_sdk_windows_show_message_dialog(host: *WindowsHost, opts: *const WindowsMessageDialogOpts) c_int;
 extern fn native_sdk_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
 extern fn native_sdk_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize) c_int;
-extern fn native_sdk_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) c_int;
+extern fn native_sdk_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_windows_remove_tray(host: *WindowsHost) void;
 extern fn native_sdk_windows_add_recent_document(host: *WindowsHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_windows_clear_recent_documents(host: *WindowsHost) c_int;
@@ -1482,6 +1482,9 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
     var ids: [max_tray_items]u32 = undefined;
     var labels: [max_tray_items][*]const u8 = undefined;
     var label_lens: [max_tray_items]usize = undefined;
+    var keys: [max_tray_items][*]const u8 = undefined;
+    var key_lens: [max_tray_items]usize = undefined;
+    var modifiers: [max_tray_items]u32 = undefined;
     var separators: [max_tray_items]c_int = undefined;
     var enabled_flags: [max_tray_items]c_int = undefined;
     // Tray labels are app-supplied too, so they get the same mnemonic
@@ -1493,10 +1496,13 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
         ids[index] = item.id;
         labels[index] = label.ptr;
         label_lens[index] = label.len;
+        keys[index] = item.key.ptr;
+        key_lens[index] = item.key.len;
+        modifiers[index] = shortcutModifierFlags(item.modifiers);
         separators[index] = if (item.separator) 1 else 0;
         enabled_flags[index] = if (item.enabled) 1 else 0;
     }
-    if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, count) == 0) return error.UnsupportedService;
+    if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &keys, &key_lens, &modifiers, &separators, &enabled_flags, count) == 0) return error.UnsupportedService;
 }
 
 fn removeTray(context: ?*anyopaque) anyerror!void {

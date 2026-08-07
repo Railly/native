@@ -395,7 +395,7 @@ extern fn native_sdk_appkit_show_open_dialog(host: *AppKitHost, opts: *const App
 extern fn native_sdk_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_show_message_dialog(host: *AppKitHost, opts: *const AppKitMessageDialogOpts) c_int;
 extern fn native_sdk_appkit_create_tray(host: *AppKitHost, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize) void;
-extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) void;
+extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, separators: [*]const c_int, enabled_flags: [*]const c_int, count: usize) void;
 extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, title: [*]const u8, title_len: usize) void;
 extern fn native_sdk_appkit_remove_tray(host: *AppKitHost) void;
 extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
@@ -2400,16 +2400,22 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
     var ids: [max_tray_items]u32 = undefined;
     var labels: [max_tray_items][*]const u8 = undefined;
     var label_lens: [max_tray_items]usize = undefined;
+    var keys: [max_tray_items][*]const u8 = undefined;
+    var key_lens: [max_tray_items]usize = undefined;
+    var modifiers: [max_tray_items]u32 = undefined;
     var separators: [max_tray_items]c_int = undefined;
     var enabled_flags: [max_tray_items]c_int = undefined;
     for (items[0..count], 0..) |item, i| {
         ids[i] = item.id;
         labels[i] = item.label.ptr;
         label_lens[i] = item.label.len;
+        keys[i] = item.key.ptr;
+        key_lens[i] = item.key.len;
+        modifiers[i] = shortcutModifierFlags(item.modifiers);
         separators[i] = if (item.separator) 1 else 0;
         enabled_flags[i] = if (item.enabled) 1 else 0;
     }
-    native_sdk_appkit_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, count);
+    native_sdk_appkit_update_tray_menu(self.host, &ids, &labels, &label_lens, &keys, &key_lens, &modifiers, &separators, &enabled_flags, count);
 }
 
 fn updateTrayTitle(context: ?*anyopaque, title: []const u8) anyerror!void {
