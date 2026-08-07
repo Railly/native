@@ -252,12 +252,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         };
 
         /// Model-derived status-item state returned by
-        /// `Options.status_item_fn`: the live button title and menu.
-        /// Slices may point at the scratch the fn received, the model, or
-        /// static strings — they only need to outlive the apply (the
-        /// runtime and platform copy what they keep).
+        /// `Options.status_item_fn`: the live button title, icon
+        /// visibility, and menu. Slices may point at the scratch the fn
+        /// received, the model, or static strings — they only need to
+        /// outlive the apply (the runtime and platform copy what they
+        /// keep).
         pub const StatusItemState = struct {
             title: []const u8 = "",
+            /// Whether the status button's icon image is shown. Defaults
+            /// to `true` (the icon installed via `status_item.icon_path`
+            /// stays put) so apps that never touch this field see no
+            /// behavior change. Set `false` on a rebuild to hide the
+            /// icon — e.g. a recording indicator that swaps to a bare
+            /// `"● 00:12"` title with no glyph — and back to `true` to
+            /// restore it; the host caches the installed image, so
+            /// toggling never re-reads the icon file from disk.
+            icon_visible: bool = true,
             items: []const platform.TrayMenuItem = &.{},
         };
 
@@ -933,6 +943,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// rebuilds only touch the platform when the output changed.
         tray_title_hash: u64 = 0,
         tray_menu_hash: u64 = 0,
+        /// Last APPLIED icon-visibility, mirroring `tray_title_hash`'s
+        /// role for a single bool (no hash needed).
+        tray_icon_visible: bool = true,
+        /// The platform reported no tray-icon-visibility seam; stop
+        /// retrying (title and menu updates keep flowing).
+        tray_icon_visible_unsupported: bool = false,
         /// Scratch handed to `status_item_fn`; on the app struct so the
         /// returned slices outlive the apply.
         tray_scratch: StatusItemScratch = .{},
@@ -3586,10 +3602,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const static = self.options.status_item orelse StatusItemOptions{};
             var title = static.title;
             var items = static.items;
+            var icon_visible = true;
             if (self.options.status_item_fn) |state_fn| {
                 const state = state_fn(&self.model, &self.tray_scratch);
                 title = state.title;
                 items = state.items;
+                icon_visible = state.icon_visible;
             }
             runtime.createTray(.{
                 .title = title,
@@ -3603,6 +3621,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.tray_created = true;
             self.tray_title_hash = hashTrayTitle(title);
             self.tray_menu_hash = hashTrayMenu(items);
+            self.tray_icon_visible = true;
+            if (!icon_visible) {
+                // The model wants to start hidden — patch it on the same
+                // install so the icon never flashes visible for one
+                // frame first.
+                runtime.updateTrayIconVisible(false) catch |err| {
+                    if (err == error.UnsupportedService) {
+                        self.tray_icon_visible_unsupported = true;
+                        ui_app_log.warn("status item icon-visibility updates unsupported on this platform: the icon stays visible", .{});
+                    } else {
+                        ui_app_log.warn("status item icon-visibility update failed: {s}", .{@errorName(err)});
+                    }
+                };
+                if (!self.tray_icon_visible_unsupported) self.tray_icon_visible = false;
+            }
         }
 
         /// Re-derive the tray state from the model after a rebuild and
@@ -3624,6 +3657,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             ui_app_log.warn("status item title updates unsupported on this platform: the menu keeps updating, the button title stays \"{s}\"-era static", .{state.title});
                         } else {
                             ui_app_log.warn("status item title update failed: {s}", .{@errorName(err)});
+                        }
+                    };
+                }
+            }
+
+            if (state.icon_visible != self.tray_icon_visible) {
+                self.tray_icon_visible = state.icon_visible;
+                if (!self.tray_icon_visible_unsupported) {
+                    runtime.updateTrayIconVisible(state.icon_visible) catch |err| {
+                        if (err == error.UnsupportedService) {
+                            self.tray_icon_visible_unsupported = true;
+                            ui_app_log.warn("status item icon-visibility updates unsupported on this platform: the icon stays as installed", .{});
+                        } else {
+                            ui_app_log.warn("status item icon-visibility update failed: {s}", .{@errorName(err)});
                         }
                     };
                 }

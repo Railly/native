@@ -2412,6 +2412,7 @@ pub const PlatformServices = struct {
     create_tray_fn: ?*const fn (context: ?*anyopaque, options: TrayOptions) anyerror!void = null,
     update_tray_menu_fn: ?*const fn (context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void = null,
     update_tray_title_fn: ?*const fn (context: ?*anyopaque, title: []const u8) anyerror!void = null,
+    update_tray_icon_visible_fn: ?*const fn (context: ?*anyopaque, visible: bool) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
@@ -2955,6 +2956,15 @@ pub const PlatformServices = struct {
     pub fn updateTrayTitle(self: PlatformServices, title: []const u8) anyerror!void {
         const title_fn = self.update_tray_title_fn orelse return error.UnsupportedService;
         return title_fn(self.context, title);
+    }
+
+    /// Show or hide the live status-bar button's icon image without
+    /// re-creating the item (mirrors `updateTrayTitle`). Added for
+    /// model-driven tray state that swaps between an icon-only idle
+    /// look and a bare-title live indicator (e.g. a recording clock).
+    pub fn updateTrayIconVisible(self: PlatformServices, visible: bool) anyerror!void {
+        const visible_fn = self.update_tray_icon_visible_fn orelse return error.UnsupportedService;
+        return visible_fn(self.context, visible);
     }
 
     pub fn removeTray(self: PlatformServices) anyerror!void {

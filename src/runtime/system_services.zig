@@ -132,11 +132,21 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             self.tray_title = try copyInto(&self.tray_title_storage, title);
         }
 
+        /// Show or hide the live status-bar button's icon image without
+        /// re-creating the item, mirroring `updateTrayTitle`'s seam.
+        /// Platforms without the seam report `UnsupportedService`; the
+        /// title and menu keep working.
+        pub fn updateTrayIconVisible(self: *Runtime, visible: bool) anyerror!void {
+            try self.options.platform.services.updateTrayIconVisible(visible);
+            self.tray_icon_visible = visible;
+        }
+
         pub fn removeTray(self: *Runtime) anyerror!void {
             try self.options.platform.services.removeTray();
             self.tray_item_count = 0;
             self.tray_created = false;
             self.tray_title = "";
+            self.tray_icon_visible = true;
         }
 
         pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {
