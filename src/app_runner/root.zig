@@ -90,6 +90,7 @@ pub const RunOptions = struct {
             // never flashes a blank window.
             info.main_window.titlebar = manifestShellStartupTitlebar();
             info.main_window.floating = manifestShellStartupBool("floating");
+            info.main_window.fullscreen_overlay = manifestShellStartupBool("fullscreen_overlay");
             info.main_window.transparent = manifestShellStartupBool("transparent");
             info.main_window.click_through = manifestShellStartupBool("click_through");
             info.main_window.resizable = manifestShellStartupResizable();
@@ -158,6 +159,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .restore_policy = windowRestorePolicy(window),
         .titlebar = windowTitlebarStyle(window),
         .floating = windowBool(window, "floating", false),
+        .fullscreen_overlay = windowBool(window, "fullscreen_overlay", false),
         .transparent = windowBool(window, "transparent", false),
         .click_through = windowBool(window, "click_through", false),
         .min_width = windowMinSize(window, "min_width"),

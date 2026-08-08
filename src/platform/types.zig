@@ -569,6 +569,8 @@ pub const WindowOptions = struct {
     /// NSFloatingWindowLevel). The desktop-companion shape: a small
     /// always-visible window that accompanies other apps.
     floating: bool = false,
+    /// Explicit cross-Space/full-screen companion behavior.
+    fullscreen_overlay: bool = false,
     /// Clear the surface to alpha 0 and let the OS composite the
     /// window's pixels over the desktop. Pair with `.chromeless` for
     /// non-rectangular companion windows.
@@ -641,6 +643,8 @@ pub const WindowCreateOptions = struct {
     /// NSFloatingWindowLevel). The desktop-companion shape: a small
     /// always-visible window that accompanies other apps.
     floating: bool = false,
+    /// Explicit cross-Space/full-screen companion behavior.
+    fullscreen_overlay: bool = false,
     /// Clear the surface to alpha 0 and let the OS composite the
     /// window's pixels over the desktop. Pair with `.chromeless` for
     /// non-rectangular companion windows.
@@ -667,6 +671,7 @@ pub const WindowCreateOptions = struct {
             .restore_policy = self.restore_policy,
             .titlebar = self.titlebar,
             .floating = self.floating,
+            .fullscreen_overlay = self.fullscreen_overlay,
             .transparent = self.transparent,
             .click_through = self.click_through,
             .popup_parent_id = self.popup_parent_id,

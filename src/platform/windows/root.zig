@@ -713,6 +713,7 @@ fn windowFlagsInt(options: anytype) c_int {
     if (options.floating) flags |= 1;
     if (options.transparent) flags |= 2;
     if (options.click_through) flags |= 4;
+    if (@hasField(@TypeOf(options), "fullscreen_overlay") and options.fullscreen_overlay) flags |= 8;
     return flags;
 }
 
@@ -1590,12 +1591,13 @@ test "windows platform module exports type" {
 }
 
 test "windows window flags pack companion chrome bits" {
-    const Flags = struct { floating: bool = false, transparent: bool = false, click_through: bool = false };
+    const Flags = struct { floating: bool = false, transparent: bool = false, click_through: bool = false, fullscreen_overlay: bool = false };
     try std.testing.expectEqual(@as(c_int, 0), windowFlagsInt(Flags{}));
     try std.testing.expectEqual(@as(c_int, 1), windowFlagsInt(Flags{ .floating = true }));
     try std.testing.expectEqual(@as(c_int, 2), windowFlagsInt(Flags{ .transparent = true }));
     try std.testing.expectEqual(@as(c_int, 4), windowFlagsInt(Flags{ .click_through = true }));
     try std.testing.expectEqual(@as(c_int, 7), windowFlagsInt(Flags{ .floating = true, .transparent = true, .click_through = true }));
+    try std.testing.expectEqual(@as(c_int, 8), windowFlagsInt(Flags{ .fullscreen_overlay = true }));
 }
 
 test "windows window flags read straight off the shared WindowOptions" {

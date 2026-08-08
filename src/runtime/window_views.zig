@@ -168,6 +168,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .default_frame = window_frame,
                 .resizable = shell_window.resizable,
                 .floating = shell_window.floating,
+                .fullscreen_overlay = shell_window.fullscreen_overlay,
                 .transparent = shell_window.transparent,
                 .click_through = shell_window.click_through,
                 .popup_parent_id = shell_window.popup_parent_id,
