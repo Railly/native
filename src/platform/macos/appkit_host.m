@@ -3162,7 +3162,11 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (BOOL)isOpaque {
-    return YES;
+    // AppKit asks the view as well as its layer when deciding whether a
+    // window can composite through to the desktop. Keep this answer in
+    // lockstep with the owning window instead of claiming every Metal
+    // surface is opaque.
+    return self.window ? self.window.isOpaque : YES;
 }
 
 - (void)viewDidMoveToWindow {
@@ -3170,9 +3174,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     // The layer's opacity follows the window's: a transparent window
     // composites the surface's alpha over the desktop, and an opaque
     // layer would fill the clear pixels with black.
-    if (self.window && !self.window.isOpaque) {
-        self.metalLayer.opaque = NO;
-    }
+    self.metalLayer.opaque = self.window ? self.window.isOpaque : YES;
     self.window.acceptsMouseMovedEvents = YES;
     [self updateDrawableSize];
     [self updateSurfaceTrackingArea];
@@ -10274,7 +10276,12 @@ int native_sdk_appkit_move_window(native_sdk_appkit_host_t *host, uint64_t windo
             if (newY < minY) { newY = minY; hitY = YES; }
             if (newY > maxY) { newY = maxY; hitY = YES; }
         }
-        if (dx != 0 || dy != 0) [window setFrameOrigin:NSMakePoint(newX, newY)];
+        // A constrained zero-delta call is also a clamp pass. If the
+        // visible-frame correction changed the origin, write it back even
+        // though the requested delta itself was zero.
+        if (dx != 0 || dy != 0 || newX != frame.origin.x || newY != frame.origin.y) {
+            [window setFrameOrigin:NSMakePoint(newX, newY)];
+        }
         // Report in the pointer convention (top-left origin, y down),
         // the same space the deltas use, so callers integrate
         // velocities without sign flips: y = distance from the top of
